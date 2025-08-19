@@ -29,7 +29,6 @@ class MCPServer(LoggingConfigurable):
         default_value="localhost", 
         help="Host for the MCP server to listen on"
     ).tag(config=True)
-
     
     def __init__(self, **kwargs):
         """Initialize the MCP server.
@@ -38,10 +37,12 @@ class MCPServer(LoggingConfigurable):
             **kwargs: Configuration parameters
         """
         super().__init__(**kwargs)
+        
         # Initialize FastMCP and tools registry
         self.mcp = FastMCP(self.name)
         self._registered_tools = {}
         self.log.info(f"Initialized MCP server '{self.name}' on {self.host}:{self.port}")
+    
     
     def register_tool(self, func: Callable, name: Optional[str] = None, description: Optional[str] = None):
         """Register a Python function as an MCP tool.
@@ -55,7 +56,8 @@ class MCPServer(LoggingConfigurable):
         tool_description = description or func.__doc__ or f"Tool: {tool_name}"
         
         self.log.info(f"Registering tool: {tool_name}")
-        self.log.debug(f"Tool details - Name: {tool_name}, Description: {tool_description}, Async: {iscoroutinefunction(func)}")
+        if self.enable_debug_logging:
+            self.log.debug(f"Tool details - Name: {tool_name}, Description: {tool_description}, Async: {iscoroutinefunction(func)}")
         
         # Register with FastMCP
         self.mcp.tool(func)
@@ -103,11 +105,9 @@ class MCPServer(LoggingConfigurable):
         
         self.log.info(f"Starting MCP server '{self.name}' on {server_host}:{self.port}")
         self.log.info(f"Registered tools: {list(self._registered_tools.keys())}")
-        self.log.debug(f"Server configuration - Host: {server_host}, Port: {self.port}, Log Level: {self.log_level}")
         
-        # Start FastMCP server with HTTP transport
-        await self.mcp.run_http_async(host=server_host, port=self.port, transport="streamable-http")
-    
-    def get_server(self):
-        """Get the FastMCP server instance."""
-        return self.mcp
+        if self.enable_debug_logging:
+            self.log.debug(f"Server configuration - Host: {server_host}, Port: {self.port}, Log Level: {self.log_level}")
+        
+        # Start FastMCP server with HTTP transport (run_streamable_http_async is deprecated)
+        await self.mcp.run_http_async(host=server_host, port=self.port)

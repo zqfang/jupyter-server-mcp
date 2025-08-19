@@ -84,21 +84,28 @@ class MCPExtensionApp(ExtensionApp):
                 logger.error(f"❌ Failed to register tool '{tool_spec}': {e}")
                 continue
     
+    def initialize(self):
+        """Initialize the extension."""
+        super().initialize()
+        # serverapp will be available as self.serverapp after parent initialization
+        
     def initialize_handlers(self):
         """Initialize the handlers for the extension."""
         # No HTTP handlers needed - MCP server runs on separate port
         pass
     
     def initialize_settings(self):
-        """Initialize settings for the extension."""
+        """Initialize settings for the extension.""" 
         # Configuration is handled by traitlets
         pass
     
     async def start_extension(self):
+        """Start the extension - called after Jupyter Server starts."""
         try:
             self.log.info(f"Starting MCP server '{self.mcp_name}' on port {self.mcp_port}")
             
             self.mcp_server_instance = MCPServer(
+                parent=self,
                 name=self.mcp_name,
                 port=self.mcp_port
             )
@@ -110,6 +117,9 @@ class MCPExtensionApp(ExtensionApp):
             self.mcp_server_task = asyncio.create_task(
                 self.mcp_server_instance.start_server()
             )
+            
+            # Give the server a moment to start
+            await asyncio.sleep(0.5)
             
             self.log.info(f"✅ MCP server started on port {self.mcp_port}")
             if self.mcp_tools:
