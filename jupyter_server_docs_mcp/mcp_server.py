@@ -30,6 +30,11 @@ class MCPServer(LoggingConfigurable):
         help="Host for the MCP server to listen on"
     ).tag(config=True)
     
+    enable_debug_logging = Bool(
+        default_value=False,
+        help="Enable debug logging for MCP operations"
+    ).tag(config=True)
+
     def __init__(self, **kwargs):
         """Initialize the MCP server.
         
@@ -42,7 +47,6 @@ class MCPServer(LoggingConfigurable):
         self.mcp = FastMCP(self.name)
         self._registered_tools = {}
         self.log.info(f"Initialized MCP server '{self.name}' on {self.host}:{self.port}")
-    
     
     def register_tool(self, func: Callable, name: Optional[str] = None, description: Optional[str] = None):
         """Register a Python function as an MCP tool.
@@ -107,7 +111,7 @@ class MCPServer(LoggingConfigurable):
         self.log.info(f"Registered tools: {list(self._registered_tools.keys())}")
         
         if self.enable_debug_logging:
-            self.log.debug(f"Server configuration - Host: {server_host}, Port: {self.port}, Log Level: {self.log_level}")
+            self.log.debug(f"Server configuration - Host: {server_host}, Port: {self.port}")
         
-        # Start FastMCP server with HTTP transport (run_streamable_http_async is deprecated)
+        # Start FastMCP server with HTTP transport
         await self.mcp.run_http_async(host=server_host, port=self.port)

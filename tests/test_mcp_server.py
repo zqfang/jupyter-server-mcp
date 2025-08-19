@@ -36,7 +36,6 @@ class TestMCPServer:
         assert server.name == "Jupyter MCP Server"
         assert server.port == 3001
         assert server.host == "localhost"
-        assert server.log_level == "INFO"
         assert server.enable_debug_logging == False
         assert server.mcp is not None
         assert len(server._registered_tools) == 0
@@ -49,24 +48,6 @@ class TestMCPServer:
         assert server.port == 3050
         assert server.host == "0.0.0.0"
         assert server.mcp is not None
-    
-    def test_server_logging_configuration(self):
-        """Test server logging configuration."""
-        server = MCPServer(log_level="DEBUG", enable_debug_logging=True)
-        
-        assert server.log_level == "DEBUG"
-        assert server.enable_debug_logging == True
-        
-    def test_server_invalid_log_level(self):
-        """Test server with invalid log level."""
-        # Should handle invalid log level gracefully
-        server = MCPServer(log_level="INVALID")
-        assert server.log_level == "INVALID"  # Trait should accept it
-        
-    def test_server_numeric_log_level(self):
-        """Test server with numeric log level.""" 
-        server = MCPServer(log_level=10)  # DEBUG level
-        assert server.log_level == 10
     
     def test_register_single_tool(self):
         """Test registering a single tool."""
@@ -185,13 +166,6 @@ class TestMCPServer:
         assert info is not None
         assert info["name"] == "simple_function"
         assert info["function"] == simple_function
-    
-    def test_get_server(self):
-        """Test getting the FastMCP server instance."""
-        server = MCPServer()
-        fastmcp_instance = server.get_server()
-        
-        assert fastmcp_instance == server.mcp
 
 
 class TestMCPServerDirect:

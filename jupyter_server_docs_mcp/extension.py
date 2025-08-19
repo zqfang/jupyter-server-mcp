@@ -144,7 +144,8 @@ class MCPExtensionApp(ExtensionApp):
                 await self.mcp_server_task
             except asyncio.CancelledError:
                 pass
-            
-            self.mcp_server_task = None
-            self.mcp_server_instance = None
-            self.log.info("MCP server stopped")
+        
+        # Always clean up
+        self.mcp_server_task = None
+        self.mcp_server_instance = None
+        self.log.info("MCP server stopped")
