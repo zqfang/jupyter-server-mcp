@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.5"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jupyter_server_docs_mcp"
+authors = [{name = "Jupyter Developer", email = "jupyter@example.com"}]
+dynamic = ["version"]
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["Jupyter", "Extension", "MCP", "FastMCP"]
+classifiers = [
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Framework :: Jupyter",
+]
+
+dependencies = [
+    "jupyter_server>=1.6,<3",
+    "fastmcp>=2.0.0"
+]
+
+[project.optional-dependencies]
+jupyterlab = ["jupyterlab-commands-toolkit"]
+jupyter_ai = ["jupyter_ai_tools>=0.2.0"]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-jupyter[server]>=0.6",
+    "pytest-tornasync>=0.6.0",
+    "pytest-mock>=3.10.0"
+]
+full = [
+    "jupyterlab-commands-toolkit",
+    "jupyter_ai_tools>=0.2.0"
+]
+
+[project.license]
+file="LICENSE"
+
+[project.entry-points."jupyter_server.extension_points"]
+jupyter_server_docs_mcp = "jupyter_server_docs_mcp.extension:MCPExtensionApp"
+
+[tool.hatch.version]
+path = "jupyter_server_docs_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel.shared-data]
+"jupyter-config" = "etc/jupyter"
