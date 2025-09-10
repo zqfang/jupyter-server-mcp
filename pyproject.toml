@@ -3,7 +3,7 @@ requires = ["hatchling>=1.5"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jupyter_server_docs_mcp"
+name = "jupyter_server_mcp"
 authors = [{name = "Jupyter Developer", email = "jupyter@example.com"}]
 dynamic = ["version"]
 readme = "README.md"
@@ -42,10 +42,10 @@ full = [
 file="LICENSE"
 
 [project.entry-points."jupyter_server.extension_points"]
-jupyter_server_docs_mcp = "jupyter_server_docs_mcp.extension:MCPExtensionApp"
+jupyter_server_mcp = "jupyter_server_mcp.extension:MCPExtensionApp"
 
 [tool.hatch.version]
-path = "jupyter_server_docs_mcp/__init__.py"
+path = "jupyter_server_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel.shared-data]
 "jupyter-config" = "etc/jupyter"

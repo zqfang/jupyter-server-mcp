@@ -3,7 +3,7 @@
 import pytest
 import asyncio
 from unittest.mock import Mock, patch, AsyncMock
-from jupyter_server_docs_mcp.mcp_server import MCPServer
+from jupyter_server_mcp.mcp_server import MCPServer
 
 
 def simple_function(x: int, y: int) -> int:

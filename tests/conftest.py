@@ -11,8 +11,8 @@ from jupyter_server.extension.application import ExtensionApp
 from jupyter_server.serverapp import ServerApp
 from tornado.testing import AsyncHTTPTestCase
 
-from jupyter_server_docs_mcp.extension import MCPExtensionApp
-from jupyter_server_docs_mcp.mcp_server import MCPServer
+from jupyter_server_mcp.extension import MCPExtensionApp
+from jupyter_server_mcp.mcp_server import MCPServer
 
 
 @pytest.fixture(scope="session")

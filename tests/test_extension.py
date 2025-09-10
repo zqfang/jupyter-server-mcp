@@ -3,7 +3,7 @@
 import pytest
 import asyncio
 from unittest.mock import Mock, patch, AsyncMock
-from jupyter_server_docs_mcp.extension import MCPExtensionApp
+from jupyter_server_mcp.extension import MCPExtensionApp
 
 
 class TestMCPExtensionApp:
@@ -13,7 +13,7 @@ class TestMCPExtensionApp:
         """Test creating extension with defaults."""
         extension = MCPExtensionApp()
         
-        assert extension.name == "jupyter_server_docs_mcp"
+        assert extension.name == "jupyter_server_mcp"
         assert extension.mcp_port == 3001
         assert extension.mcp_name == "Jupyter MCP Server"
     
@@ -57,7 +57,7 @@ class TestMCPExtensionLifecycle:
         extension.mcp_name = "Test Server"
         
         # Mock the MCP server creation to avoid actual server startup
-        with patch('jupyter_server_docs_mcp.extension.MCPServer') as mock_mcp_class:
+        with patch('jupyter_server_mcp.extension.MCPServer') as mock_mcp_class:
             mock_server = Mock()
             mock_server.start_server = AsyncMock()
             mock_mcp_class.return_value = mock_server
@@ -82,7 +82,7 @@ class TestMCPExtensionLifecycle:
         extension = MCPExtensionApp()
         
         # Mock server creation to raise an exception
-        with patch('jupyter_server_docs_mcp.extension.MCPServer') as mock_mcp_class:
+        with patch('jupyter_server_mcp.extension.MCPServer') as mock_mcp_class:
             mock_mcp_class.side_effect = Exception("Server creation failed")
             
             with pytest.raises(Exception, match="Server creation failed"):
@@ -147,7 +147,7 @@ class TestMCPExtensionLifecycle:
         extension.mcp_name = "Lifecycle Test Server"
         
         # Mock the MCP server
-        with patch('jupyter_server_docs_mcp.extension.MCPServer') as mock_mcp_class:
+        with patch('jupyter_server_mcp.extension.MCPServer') as mock_mcp_class:
             mock_server = Mock()
             mock_server.start_server = AsyncMock()
             mock_mcp_class.return_value = mock_server
@@ -261,7 +261,7 @@ class TestToolLoading:
         
         # Capture log output
         import logging
-        with patch('jupyter_server_docs_mcp.extension.logger') as mock_logger:
+        with patch('jupyter_server_mcp.extension.logger') as mock_logger:
             extension._register_configured_tools()
             
             # Should register both tools
@@ -278,7 +278,7 @@ class TestToolLoading:
         extension.mcp_server_instance = Mock()
         extension.mcp_tools = ["os:getcwd", "invalid:function", "math:sqrt"]
         
-        with patch('jupyter_server_docs_mcp.extension.logger') as mock_logger:
+        with patch('jupyter_server_mcp.extension.logger') as mock_logger:
             extension._register_configured_tools()
             
             # Should register 2 valid tools (os:getcwd and math:sqrt)
@@ -299,7 +299,7 @@ class TestExtensionWithTools:
         extension.mcp_name = "Test Server With Tools"
         extension.mcp_tools = ["os:getcwd", "math:sqrt"]
         
-        with patch('jupyter_server_docs_mcp.extension.MCPServer') as mock_mcp_class:
+        with patch('jupyter_server_mcp.extension.MCPServer') as mock_mcp_class:
             mock_server = Mock()
             mock_server.start_server = AsyncMock()
             mock_server._registered_tools = {"getcwd": {}, "sqrt": {}}  # Mock registered tools
@@ -324,7 +324,7 @@ class TestExtensionWithTools:
         extension.mcp_port = 3088
         extension.mcp_tools = []
         
-        with patch('jupyter_server_docs_mcp.extension.MCPServer') as mock_mcp_class:
+        with patch('jupyter_server_mcp.extension.MCPServer') as mock_mcp_class:
             mock_server = Mock()
             mock_server.start_server = AsyncMock()
             mock_server._registered_tools = {}

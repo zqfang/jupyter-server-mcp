@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class MCPExtensionApp(ExtensionApp):
     """The Jupyter Server MCP extension app."""
     
-    name = "jupyter_server_docs_mcp"
+    name = "jupyter_server_mcp"
     description = "Jupyter Server extension providing MCP server for tool registration"
     
     # Configurable traits
