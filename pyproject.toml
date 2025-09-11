@@ -28,10 +28,11 @@ jupyterlab = ["jupyterlab-commands-toolkit"]
 jupyter_ai = ["jupyter_ai_tools>=0.2.0"]
 test = [
     "pytest>=7.0",
-    "pytest-asyncio>=0.21.0",
+    "pytest-asyncio>=0.21.0", 
     "pytest-jupyter[server]>=0.6",
     "pytest-tornasync>=0.6.0",
-    "pytest-mock>=3.10.0"
+    "pytest-mock>=3.10.0",
+    "pytest-cov>=4.0.0"
 ]
 dev = [
     "ruff>=0.1.0"
