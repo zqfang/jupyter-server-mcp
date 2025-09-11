@@ -29,14 +29,11 @@ jobs:
     
     - name: Run linting
       run: |
-        # Install linting tools
-        pip install flake8 black isort
-        # Check formatting
-        black --check --diff .
-        # Check import sorting
-        isort --check-only --diff .
-        # Run flake8
-        flake8 jupyter_server_mcp tests
+        # Install ruff
+        pip install ruff
+        # Check linting and formatting
+        ruff check jupyter_server_mcp tests
+        ruff format --check jupyter_server_mcp tests
     
     - name: Run unit tests
       run: |

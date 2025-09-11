@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from tornado.web import Application
 
 from jupyter_server_mcp.extension import MCPExtensionApp
 from jupyter_server_mcp.mcp_server import MCPServer
@@ -36,7 +37,6 @@ def mcp_extension():
 @pytest.fixture
 def mock_serverapp():
     """Create a mock Jupyter Server app for testing."""
-    from tornado.web import Application
 
     class MockServerApp:
         def __init__(self):
@@ -59,9 +59,7 @@ def mock_serverapp():
 @pytest.fixture
 def mcp_server_simple():
     """Create a simple MCP server for testing."""
-    return MCPServer(
-        port=3097, log_level="WARNING"
-    )  # Use WARNING to reduce test noise
+    return MCPServer(port=3097, log_level="WARNING")  # Use WARNING to reduce test noise
 
 
 # Pytest configuration
@@ -69,9 +67,7 @@ def pytest_configure(config):
     """Configure pytest with custom markers."""
     config.addinivalue_line("markers", "asyncio: mark test as async")
     config.addinivalue_line("markers", "slow: mark test as slow running")
-    config.addinivalue_line(
-        "markers", "integration: mark test as integration test"
-    )
+    config.addinivalue_line("markers", "integration: mark test as integration test")
 
 
 # Auto-use asyncio for async tests

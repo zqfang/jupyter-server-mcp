@@ -227,12 +227,8 @@ class TestToolLoading:
         """Test loading functions from non-existent modules."""
         extension = MCPExtensionApp()
 
-        with pytest.raises(
-            ImportError, match="Could not import module"
-        ):
-            extension._load_function_from_string(
-                "nonexistent_module:some_func"
-            )
+        with pytest.raises(ImportError, match="Could not import module"):
+            extension._load_function_from_string("nonexistent_module:some_func")
 
     def test_load_function_from_string_invalid_function(self):
         """Test loading non-existent functions from valid modules."""
