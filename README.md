@@ -80,12 +80,12 @@ The MCP server will start automatically on `http://localhost:8080/mcp`.
 
 ### Core Components
 
-#### MCPServer (`jupyter_server_docs_mcp.mcp_server.MCPServer`)
+#### MCPServer (`jupyter_server_mcp.mcp_server.MCPServer`)
 
 A simplified LoggingConfigurable class that manages FastMCP integration:
 
 ```python
-from jupyter_server_docs_mcp.mcp_server import MCPServer
+from jupyter_server_mcp.mcp_server import MCPServer
 
 # Create server
 server = MCPServer(name="My Server", port=8080)
@@ -106,7 +106,7 @@ await server.start_server()
 - `list_tools()` - Get list of registered tools
 - `start_server(host=None)` - Start the HTTP MCP server
 
-#### MCPExtensionApp (`jupyter_server_docs_mcp.extension.MCPExtensionApp`)
+#### MCPExtensionApp (`jupyter_server_mcp.extension.MCPExtensionApp`)
 
 Jupyter Server extension that manages the MCP server lifecycle:
 
@@ -188,14 +188,14 @@ pip install -e ".[dev]"
 pytest tests/ -v
 
 # Run with coverage
-pytest --cov=jupyter_server_docs_mcp tests/
+pytest --cov=jupyter_server_mcp tests/
 ```
 
 ### Project Structure
 
 ```
-jupyter_server_docs_mcp/
-├── jupyter_server_docs_mcp/
+jupyter_server_mcp/
+├── jupyter_server_mcp/
 │   ├── __init__.py
 │   ├── mcp_server.py      # Core MCP server implementation
 │   └── extension.py       # Jupyter Server extension

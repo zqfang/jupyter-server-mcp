@@ -1,18 +1,14 @@
 """Pytest configuration and fixtures for jupyter-server-docs-mcp tests."""
 
 import asyncio
-import os
 import tempfile
 from pathlib import Path
-from typing import Dict, Any
 
 import pytest
-from jupyter_server.extension.application import ExtensionApp
-from jupyter_server.serverapp import ServerApp
-from tornado.testing import AsyncHTTPTestCase
+from tornado.web import Application
 
-from jupyter_server_docs_mcp.extension import MCPExtensionApp
-from jupyter_server_docs_mcp.mcp_server import MCPServer
+from jupyter_server_mcp.extension import MCPExtensionApp
+from jupyter_server_mcp.mcp_server import MCPServer
 
 
 @pytest.fixture(scope="session")
@@ -30,11 +26,6 @@ def temp_dir():
         yield Path(tmpdir)
 
 
-
-
-
-
-
 @pytest.fixture
 def mcp_extension():
     """Create an MCP extension instance for testing."""
@@ -43,32 +34,25 @@ def mcp_extension():
     return extension
 
 
-
-
-
-
-
-
 @pytest.fixture
 def mock_serverapp():
     """Create a mock Jupyter Server app for testing."""
-    from tornado.web import Application
-    
+
     class MockServerApp:
         def __init__(self):
             self.log = MockLogger()
             self.web_app = Application()  # Add required web_app attribute
-            
+
     class MockLogger:
         def info(self, msg):
             print(f"INFO: {msg}")
-            
+
         def error(self, msg):
             print(f"ERROR: {msg}")
-            
+
         def warning(self, msg):
             print(f"WARNING: {msg}")
-    
+
     return MockServerApp()
 
 
@@ -81,16 +65,10 @@ def mcp_server_simple():
 # Pytest configuration
 def pytest_configure(config):
     """Configure pytest with custom markers."""
-    config.addinivalue_line(
-        "markers", "asyncio: mark test as async"
-    )
-    config.addinivalue_line(
-        "markers", "slow: mark test as slow running"
-    )
-    config.addinivalue_line(
-        "markers", "integration: mark test as integration test"
-    )
+    config.addinivalue_line("markers", "asyncio: mark test as async")
+    config.addinivalue_line("markers", "slow: mark test as slow running")
+    config.addinivalue_line("markers", "integration: mark test as integration test")
 
 
 # Auto-use asyncio for async tests
-pytest_plugins = ['pytest_asyncio']
+pytest_plugins = ["pytest_asyncio"]
