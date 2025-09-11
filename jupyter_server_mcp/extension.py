@@ -1,9 +1,9 @@
 """Jupyter Server extension for managing MCP server."""
 
 import asyncio
+import contextlib
 import importlib
 import logging
-from typing import Optional
 
 from jupyter_server.extension.application import ExtensionApp
 from traitlets import Int, List, Unicode
@@ -17,14 +17,12 @@ class MCPExtensionApp(ExtensionApp):
     """The Jupyter Server MCP extension app."""
 
     name = "jupyter_server_mcp"
-    description = (
-        "Jupyter Server extension providing MCP server for tool registration"
-    )
+    description = "Jupyter Server extension providing MCP server for tool registration"
 
     # Configurable traits
-    mcp_port = Int(
-        default_value=3001, help="Port for the MCP server to listen on"
-    ).tag(config=True)
+    mcp_port = Int(default_value=3001, help="Port for the MCP server to listen on").tag(
+        config=True
+    )
 
     mcp_name = Unicode(
         default_value="Jupyter MCP Server", help="Name for the MCP server"
@@ -40,8 +38,8 @@ class MCPExtensionApp(ExtensionApp):
         ),
     ).tag(config=True)
 
-    mcp_server_instance: Optional[object] = None
-    mcp_server_task: Optional[asyncio.Task] = None
+    mcp_server_instance: object | None = None
+    mcp_server_task: asyncio.Task | None = None
 
     def _load_function_from_string(self, tool_spec: str):
         """Load a function from a string specification.
@@ -59,25 +57,23 @@ class MCPExtensionApp(ExtensionApp):
             AttributeError: If function not found in module
         """
         if ":" not in tool_spec:
-            raise ValueError(
+            msg = (
                 f"Invalid tool specification '{tool_spec}'. "
                 f"Expected format: 'module_path:function_name'"
             )
+            raise ValueError(msg)
 
         module_path, function_name = tool_spec.rsplit(":", 1)
 
         try:
             module = importlib.import_module(module_path)
-            function = getattr(module, function_name)
-            return function
+            return getattr(module, function_name)
         except ImportError as e:
-            raise ImportError(
-                f"Could not import module '{module_path}': {e}"
-            )
+            msg = f"Could not import module '{module_path}': {e}"
+            raise ImportError(msg) from e
         except AttributeError as e:
-            raise AttributeError(
-                f"Function '{function_name}' not found in module '{module_path}': {e}"
-            )
+            msg = f"Function '{function_name}' not found in module '{module_path}': {e}"
+            raise AttributeError(msg) from e
 
     def _register_configured_tools(self):
         """Register tools specified in the mcp_tools configuration."""
@@ -92,9 +88,7 @@ class MCPExtensionApp(ExtensionApp):
                 self.mcp_server_instance.register_tool(function)
                 logger.info(f"✅ Registered tool: {tool_spec}")
             except Exception as e:
-                logger.error(
-                    f"❌ Failed to register tool '{tool_spec}': {e}"
-                )
+                logger.error(f"❌ Failed to register tool '{tool_spec}': {e}")
                 continue
 
     def initialize(self):
@@ -105,12 +99,10 @@ class MCPExtensionApp(ExtensionApp):
     def initialize_handlers(self):
         """Initialize the handlers for the extension."""
         # No HTTP handlers needed - MCP server runs on separate port
-        pass
 
     def initialize_settings(self):
         """Initialize settings for the extension."""
         # Configuration is handled by traitlets
-        pass
 
     async def start_extension(self):
         """Start the extension - called after Jupyter Server starts."""
@@ -137,19 +129,15 @@ class MCPExtensionApp(ExtensionApp):
             self.log.info(f"✅ MCP server started on port {self.mcp_port}")
             if self.mcp_tools:
                 registered_count = len(self.mcp_server_instance._registered_tools)
-                self.log.info(
-                    f"Registered {registered_count} tools from configuration"
-                )
+                self.log.info(f"Registered {registered_count} tools from configuration")
             else:
-                self.log.info(
-                    "Use mcp_server_instance.register_tool() to add tools"
-                )
+                self.log.info("Use mcp_server_instance.register_tool() to add tools")
 
         except Exception as e:
             self.log.error(f"Failed to start MCP server: {e}")
             raise
 
-    async def _start_jupyter_server_extension(self, serverapp):
+    async def _start_jupyter_server_extension(self, serverapp):  # noqa: ARG002
         """Start the extension - called after Jupyter Server starts."""
         await self.start_extension()
 
@@ -158,10 +146,8 @@ class MCPExtensionApp(ExtensionApp):
         if self.mcp_server_task and not self.mcp_server_task.done():
             self.log.info("Stopping MCP server")
             self.mcp_server_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self.mcp_server_task
-            except asyncio.CancelledError:
-                pass
 
         # Always clean up
         self.mcp_server_task = None

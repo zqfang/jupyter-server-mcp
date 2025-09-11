@@ -1,8 +1,9 @@
 """Simple MCP server for registering Python functions as tools."""
 
 import logging
+from collections.abc import Callable
 from inspect import iscoroutinefunction
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any
 
 from fastmcp import FastMCP
 from traitlets import Bool, Int, Unicode
@@ -19,9 +20,9 @@ class MCPServer(LoggingConfigurable):
         default_value="Jupyter MCP Server", help="Name for the MCP server"
     ).tag(config=True)
 
-    port = Int(
-        default_value=3001, help="Port for the MCP server to listen on"
-    ).tag(config=True)
+    port = Int(default_value=3001, help="Port for the MCP server to listen on").tag(
+        config=True
+    )
 
     host = Unicode(
         default_value="localhost", help="Host for the MCP server to listen on"
@@ -49,8 +50,8 @@ class MCPServer(LoggingConfigurable):
     def register_tool(
         self,
         func: Callable,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
+        name: str | None = None,
+        description: str | None = None,
     ):
         """Register a Python function as an MCP tool.
 
@@ -81,9 +82,7 @@ class MCPServer(LoggingConfigurable):
             "is_async": iscoroutinefunction(func),
         }
 
-    def register_tools(
-        self, tools: Union[List[Callable], Dict[str, Callable]]
-    ):
+    def register_tools(self, tools: list[Callable] | dict[str, Callable]):
         """Register multiple Python functions as MCP tools.
 
         Args:
@@ -96,31 +95,26 @@ class MCPServer(LoggingConfigurable):
             for name, func in tools.items():
                 self.register_tool(func, name=name)
         else:
-            raise ValueError(
-                "tools must be a list of functions or dict mapping names to functions"
-            )
+            msg = "tools must be a list of functions or dict mapping names to functions"
+            raise ValueError(msg)
 
-    def list_tools(self) -> List[Dict[str, Any]]:
+    def list_tools(self) -> list[dict[str, Any]]:
         """List all registered tools."""
         return [
             {"name": tool["name"], "description": tool["description"]}
             for tool in self._registered_tools.values()
         ]
 
-    def get_tool_info(self, tool_name: str) -> Optional[Dict[str, Any]]:
+    def get_tool_info(self, tool_name: str) -> dict[str, Any] | None:
         """Get information about a specific tool."""
         return self._registered_tools.get(tool_name)
 
-    async def start_server(self, host: Optional[str] = None):
+    async def start_server(self, host: str | None = None):
         """Start the MCP server on the specified host and port."""
         server_host = host or self.host
 
-        self.log.info(
-            f"Starting MCP server '{self.name}' on {server_host}:{self.port}"
-        )
-        self.log.info(
-            f"Registered tools: {list(self._registered_tools.keys())}"
-        )
+        self.log.info(f"Starting MCP server '{self.name}' on {server_host}:{self.port}")
+        self.log.info(f"Registered tools: {list(self._registered_tools.keys())}")
 
         if self.enable_debug_logging:
             self.log.debug(
