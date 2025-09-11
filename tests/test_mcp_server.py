@@ -241,7 +241,10 @@ class TestJSONArgumentConversion:
 
         def func_with_optional_dict(data: dict | None = None) -> dict:
             """Function with optional dict parameter."""
-            return {"received": data, "type": type(data).__name__ if data else "NoneType"}
+            return {
+                "received": data,
+                "type": type(data).__name__ if data else "NoneType",
+            }
 
         wrapped_func = _wrap_with_json_conversion(func_with_optional_dict)
 
@@ -260,7 +263,10 @@ class TestJSONArgumentConversion:
 
         def func_with_union_dict(data: dict | None) -> dict:
             """Function with Union[dict, None] parameter."""
-            return {"received": data, "type": type(data).__name__ if data else "NoneType"}
+            return {
+                "received": data,
+                "type": type(data).__name__ if data else "NoneType",
+            }
 
         wrapped_func = _wrap_with_json_conversion(func_with_union_dict)
 
@@ -313,17 +319,13 @@ class TestJSONArgumentConversion:
                 "count": count,
                 "count_type": type(count).__name__,
                 "data": data,
-                "data_type": type(data).__name__
+                "data_type": type(data).__name__,
             }
 
         wrapped_func = _wrap_with_json_conversion(mixed_func)
 
         # Only the dict parameter should be converted
-        result = wrapped_func(
-            name="test",
-            count=42,
-            data='{"converted": true}'
-        )
+        result = wrapped_func(name="test", count=42, data='{"converted": true}')
 
         assert result["name"] == "test"
         assert result["name_type"] == "str"
@@ -357,7 +359,7 @@ class TestJSONArgumentConversion:
 
         wrapped_func = _wrap_with_json_conversion(func_with_nested_dict)
 
-        complex_json = '''{
+        complex_json = """{
             "users": [
                 {"name": "Alice", "age": 30},
                 {"name": "Bob", "age": 25}
@@ -366,18 +368,12 @@ class TestJSONArgumentConversion:
                 "version": "1.0",
                 "created": "2024-01-01"
             }
-        }'''
+        }"""
 
         result = wrapped_func(data=complex_json)
         expected = {
-            "users": [
-                {"name": "Alice", "age": 30},
-                {"name": "Bob", "age": 25}
-            ],
-            "metadata": {
-                "version": "1.0",
-                "created": "2024-01-01"
-            }
+            "users": [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}],
+            "metadata": {"version": "1.0", "created": "2024-01-01"},
         }
         assert result["processed"] == expected
 
@@ -392,12 +388,12 @@ class TestJSONArgumentConversion:
 
         # Check that annotations were modified to accept strings
         annotations = wrapped_func.__annotations__
-        assert 'data' in annotations
-        
+        assert "data" in annotations
+
         # The annotation should now be dict | str (or Union equivalent)
-        data_annotation = annotations['data']
+        data_annotation = annotations["data"]
         # We can check this works by ensuring both dict and str are acceptable
-        assert hasattr(data_annotation, '__args__') or data_annotation == (dict | str)
+        assert hasattr(data_annotation, "__args__") or data_annotation == (dict | str)
 
 
 class TestJSONSchemaModification:
@@ -431,16 +427,14 @@ class TestJSONSchemaModification:
                 "types": {
                     "config": type(config).__name__,
                     "metadata": type(metadata).__name__,
-                    "name": type(name).__name__
-                }
+                    "name": type(name).__name__,
+                },
             }
 
         wrapped_func = _wrap_with_json_conversion(func_multiple_dicts)
 
         result = wrapped_func(
-            config='{"key1": "value1"}',
-            metadata='{"version": 2}',
-            name="test_function"
+            config='{"key1": "value1"}', metadata='{"version": 2}', name="test_function"
         )
 
         assert result["config"] == {"key1": "value1"}
