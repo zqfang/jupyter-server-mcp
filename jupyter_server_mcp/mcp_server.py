@@ -1,15 +1,15 @@
 """Simple MCP server for registering Python functions as tools."""
 
+import inspect
 import json
 import logging
 from collections.abc import Callable
 from functools import wraps
 from inspect import iscoroutinefunction, signature
-import inspect
-from typing import Any, Union, get_origin, get_args
+from typing import Any, Union, get_args, get_origin
 
 from fastmcp import FastMCP
-from traitlets import Bool, Int, Unicode
+from traitlets import Int, Unicode
 from traitlets.config.configurable import LoggingConfigurable
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ def _auto_convert_json_args(func: Callable) -> Callable:
     
     Additionally, this function modifies the type annotations to accept Union[dict, str]
     for dict parameters to allow Pydantic validation to pass.
+    
+    This conversion is always applied to all registered tools to ensure compatibility
+    with various MCP clients that may serialize dict parameters differently.
     
     Args:
         func: The function to wrap
@@ -51,16 +54,13 @@ def _auto_convert_json_args(func: Callable) -> Callable:
             return dict in args
             
         # Dict[K, V] style annotations
-        if hasattr(annotation, '__origin__') and annotation.__origin__ is dict:
-            return True
-            
-        return False
+        return bool(hasattr(annotation, '__origin__') and annotation.__origin__ is dict)
     
     def _modify_annotation_for_string_support(annotation):
         """Modify annotation to also accept strings for dict types."""
-        # Direct dict annotation -> Union[dict, str]
+        # Direct dict annotation -> dict | str
         if annotation is dict:
-            return Union[dict, str]
+            return dict | str
             
         # Optional[dict] or Union[dict, None] etc.
         origin = get_origin(annotation)
@@ -69,12 +69,12 @@ def _auto_convert_json_args(func: Callable) -> Callable:
             if dict in args:
                 # Add str to the union if it's not already there
                 if str not in args:
-                    return Union[tuple(args) + (str,)]
+                    return Union[(*tuple(args), str)]
                 return annotation
             
-        # Dict[K, V] style annotations -> Union[Dict[K, V], str]
+        # Dict[K, V] style annotations -> annotation | str
         if hasattr(annotation, '__origin__') and annotation.__origin__ is dict:
-            return Union[annotation, str]
+            return annotation | str
             
         return annotation
     
@@ -115,40 +115,41 @@ def _auto_convert_json_args(func: Callable) -> Callable:
         # Set the modified annotations on the wrapper
         async_wrapper.__annotations__ = new_annotations
         return async_wrapper
-    else:
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            # Convert keyword arguments that should be dicts but are strings
-            converted_kwargs = {}
-            for param_name, param_value in kwargs.items():
-                if param_name in sig.parameters:
-                    param = sig.parameters[param_name]
-                    if _should_convert_to_dict(param.annotation, param_value):
-                        try:
-                            converted_kwargs[param_name] = json.loads(param_value)
-                            logger.debug(f"Converted JSON string to dict for parameter '{param_name}': {param_value}")
-                        except json.JSONDecodeError:
-                            # If it's not valid JSON, pass the string as-is
-                            converted_kwargs[param_name] = param_value
-                    else:
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        # Convert keyword arguments that should be dicts but are strings
+        converted_kwargs = {}
+        for param_name, param_value in kwargs.items():
+            if param_name in sig.parameters:
+                param = sig.parameters[param_name]
+                if _should_convert_to_dict(param.annotation, param_value):
+                    try:
+                        converted_kwargs[param_name] = json.loads(param_value)
+                        logger.debug(f"Converted JSON string to dict for parameter '{param_name}': {param_value}")
+                    except json.JSONDecodeError:
+                        # If it's not valid JSON, pass the string as-is
                         converted_kwargs[param_name] = param_value
                 else:
                     converted_kwargs[param_name] = param_value
-            
-            return func(*args, **converted_kwargs)
+            else:
+                converted_kwargs[param_name] = param_value
         
-        # Set the modified annotations on the wrapper  
-        sync_wrapper.__annotations__ = new_annotations
-        return sync_wrapper
+        return func(*args, **converted_kwargs)
+    
+    # Set the modified annotations on the wrapper  
+    sync_wrapper.__annotations__ = new_annotations
+    return sync_wrapper
 
 
 def _modify_schema_for_json_string_support(func: Callable, tool) -> None:
     """
-    Modify the tool's JSON schema to accept strings for dict parameters when auto-conversion is enabled.
+    Modify the tool's JSON schema to accept strings for dict parameters.
     
     This function updates the input schema to allow JSON strings in addition to objects for
     parameters that are annotated as dict types, enabling MCP clients to pass JSON strings
     that will be automatically converted to dicts.
+    
+    This modification is always applied to ensure compatibility with various MCP clients.
     
     Args:
         func: The original function
@@ -231,11 +232,6 @@ class MCPServer(LoggingConfigurable):
         default_value="localhost", help="Host for the MCP server to listen on"
     ).tag(config=True)
 
-    auto_convert_json_args = Bool(
-        default_value=True, 
-        help="Automatically convert JSON string arguments to dict objects for dict-typed parameters"
-    ).tag(config=True)
-
     def __init__(self, **kwargs):
         """Initialize the MCP server.
 
@@ -274,17 +270,15 @@ class MCPServer(LoggingConfigurable):
             f"Description: {tool_description}, Async: {iscoroutinefunction(func)}"
         )
 
-        # Apply auto-conversion wrapper if enabled
-        registered_func = func
-        if self.auto_convert_json_args:
-            registered_func = _auto_convert_json_args(func)
-            self.log.debug(f"Applied JSON argument auto-conversion wrapper to {tool_name}")
+        # Apply auto-conversion wrapper (always enabled)
+        registered_func = _auto_convert_json_args(func)
+        self.log.debug(f"Applied JSON argument auto-conversion wrapper to {tool_name}")
 
         # Register with FastMCP
         tool = self.mcp.tool(registered_func)
 
-        # Modify schema to support JSON strings for dict parameters if auto-conversion is enabled
-        if self.auto_convert_json_args and tool:
+        # Modify schema to support JSON strings for dict parameters
+        if tool:
             _modify_schema_for_json_string_support(func, tool)
             self.log.debug(f"Modified schema for tool '{tool_name}' to accept JSON strings for dict parameters")
 
