@@ -37,7 +37,6 @@ class TestMCPServer:
         assert server.name == "Jupyter MCP Server"
         assert server.port == 3001
         assert server.host == "localhost"
-        assert server.enable_debug_logging is False
         assert server.mcp is not None
         assert len(server._registered_tools) == 0
 
