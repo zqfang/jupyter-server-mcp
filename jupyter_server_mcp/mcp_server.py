@@ -15,7 +15,23 @@ from traitlets.config.configurable import LoggingConfigurable
 logger = logging.getLogger(__name__)
 
 
-def _auto_convert_json_args(func: Callable) -> Callable:
+def _is_dict_compatible_annotation(annotation) -> bool:
+    """Check if an annotation expects dict values that can be JSON-converted."""
+    # Direct dict annotation
+    if annotation is dict:
+        return True
+        
+    # Union types: Optional[dict], Union[dict, None], dict | None
+    origin = get_origin(annotation)
+    if origin is Union or (hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType'):
+        args = get_args(annotation)
+        return dict in args
+        
+    # Typed dict annotations: Dict[K, V], dict[str, Any]
+    return bool(hasattr(annotation, '__origin__') and annotation.__origin__ is dict)
+
+
+def _wrap_with_json_conversion(func: Callable) -> Callable:
     """
     Wrapper that automatically converts JSON string arguments to dictionaries.
     
@@ -40,60 +56,36 @@ def _auto_convert_json_args(func: Callable) -> Callable:
     
     def _should_convert_to_dict(annotation, value):
         """Check if a parameter should be converted from JSON string to dict."""
-        if not isinstance(value, str):
-            return False
-            
-        # Direct dict annotation
-        if annotation is dict:
-            return True
-            
-        # Optional[dict] or Union[dict, None] etc. (old typing.Union)
-        origin = get_origin(annotation)
-        if origin is Union:
-            args = get_args(annotation)
-            return dict in args
-            
-        # New Python 3.10+ union syntax: dict | None
-        if hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType':
-            # For dict | None style unions
-            args = get_args(annotation)
-            return dict in args
-            
-        # Dict[K, V] style annotations
-        return bool(hasattr(annotation, '__origin__') and annotation.__origin__ is dict)
+        return isinstance(value, str) and _is_dict_compatible_annotation(annotation)
     
-    def _modify_annotation_for_string_support(annotation):
+    def _add_string_to_annotation(annotation):
         """Modify annotation to also accept strings for dict types."""
         # Direct dict annotation -> dict | str
         if annotation is dict:
             return dict | str
             
-        # Optional[dict] or Union[dict, None] etc. (old typing.Union)
+        # Union types: add str to existing union
         origin = get_origin(annotation)
         if origin is Union:
             args = get_args(annotation)
-            if dict in args:
-                # Add str to the union if it's not already there
-                if str not in args:
-                    return Union[(*tuple(args), str)]
-                return annotation
+            if dict in args and str not in args:
+                return Union[(*tuple(args), str)]
+            return annotation
         
         # New Python 3.10+ union syntax: dict | None
         if hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType':
             args = get_args(annotation)
-            if dict in args:
-                # Add str to the union if it's not already there
-                if str not in args:
-                    # Reconstruct the union with str added
-                    new_args = (*tuple(args), str)
-                    # Create new union type
-                    result = new_args[0]
-                    for arg in new_args[1:]:
-                        result = result | arg
-                    return result
-                return annotation
+            if dict in args and str not in args:
+                # Reconstruct the union with str added
+                new_args = (*tuple(args), str)
+                # Create new union type
+                result = new_args[0]
+                for arg in new_args[1:]:
+                    result = result | arg
+                return result
+            return annotation
             
-        # Dict[K, V] style annotations -> annotation | str
+        # Typed dict annotations -> annotation | str
         if hasattr(annotation, '__origin__') and annotation.__origin__ is dict:
             return annotation | str
             
@@ -103,7 +95,7 @@ def _auto_convert_json_args(func: Callable) -> Callable:
     new_annotations = {}
     for param_name, param in sig.parameters.items():
         if param.annotation != inspect.Parameter.empty:
-            new_annotations[param_name] = _modify_annotation_for_string_support(param.annotation)
+            new_annotations[param_name] = _add_string_to_annotation(param.annotation)
         else:
             new_annotations[param_name] = param.annotation
     
@@ -136,6 +128,7 @@ def _auto_convert_json_args(func: Callable) -> Callable:
         # Set the modified annotations on the wrapper
         async_wrapper.__annotations__ = new_annotations
         return async_wrapper
+    
     @wraps(func)
     def sync_wrapper(*args, **kwargs):
         # Convert keyword arguments that should be dicts but are strings
@@ -162,7 +155,7 @@ def _auto_convert_json_args(func: Callable) -> Callable:
     return sync_wrapper
 
 
-def _modify_schema_for_json_string_support(func: Callable, tool) -> None:
+def _update_schema_for_json_args(func: Callable, tool) -> None:
     """
     Modify the tool's JSON schema to accept strings for dict parameters.
     
@@ -191,19 +184,7 @@ def _modify_schema_for_json_string_support(func: Callable, tool) -> None:
                 
                 # Check if this parameter should support JSON string conversion
                 annotation = param.annotation
-                should_support_string = False
-                
-                # Direct dict annotation
-                if annotation is dict:
-                    should_support_string = True
-                # Optional[dict] or Union[dict, None] etc. (old typing.Union)
-                elif get_origin(annotation) is Union or (hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType'):
-                    args = get_args(annotation)
-                    if dict in args:
-                        should_support_string = True
-                # Dict[K, V] style annotations
-                elif hasattr(annotation, '__origin__') and annotation.__origin__ is dict:
-                    should_support_string = True
+                should_support_string = _is_dict_compatible_annotation(annotation)
                 
                 if should_support_string:
                     # Modify the schema to also accept strings
@@ -292,7 +273,7 @@ class MCPServer(LoggingConfigurable):
         )
 
         # Apply auto-conversion wrapper (always enabled)
-        registered_func = _auto_convert_json_args(func)
+        registered_func = _wrap_with_json_conversion(func)
         self.log.debug(f"Applied JSON argument auto-conversion wrapper to {tool_name}")
 
         # Register with FastMCP
@@ -300,7 +281,7 @@ class MCPServer(LoggingConfigurable):
 
         # Modify schema to support JSON strings for dict parameters
         if tool:
-            _modify_schema_for_json_string_support(func, tool)
+            _update_schema_for_json_args(func, tool)
             self.log.debug(f"Modified schema for tool '{tool_name}' to accept JSON strings for dict parameters")
 
         # Keep track for listing

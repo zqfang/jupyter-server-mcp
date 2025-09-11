@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from jupyter_server_mcp.mcp_server import MCPServer, _auto_convert_json_args
+from jupyter_server_mcp.mcp_server import MCPServer, _wrap_with_json_conversion
 
 
 def simple_function(x: int, y: int) -> int:
@@ -224,7 +224,7 @@ class TestJSONArgumentConversion:
             """Function that expects a dict."""
             return {"received": data, "type": type(data).__name__}
 
-        wrapped_func = _auto_convert_json_args(func_with_dict)
+        wrapped_func = _wrap_with_json_conversion(func_with_dict)
 
         # Test with actual dict (should pass through)
         result = wrapped_func(data={"key": "value"})
@@ -243,7 +243,7 @@ class TestJSONArgumentConversion:
             """Function with optional dict parameter."""
             return {"received": data, "type": type(data).__name__ if data else "NoneType"}
 
-        wrapped_func = _auto_convert_json_args(func_with_optional_dict)
+        wrapped_func = _wrap_with_json_conversion(func_with_optional_dict)
 
         # Test with None (should pass through)
         result = wrapped_func(data=None)
@@ -262,7 +262,7 @@ class TestJSONArgumentConversion:
             """Function with Union[dict, None] parameter."""
             return {"received": data, "type": type(data).__name__ if data else "NoneType"}
 
-        wrapped_func = _auto_convert_json_args(func_with_union_dict)
+        wrapped_func = _wrap_with_json_conversion(func_with_union_dict)
 
         # Test with JSON string (should be converted)
         result = wrapped_func(data='{"union": "test"}')
@@ -276,7 +276,7 @@ class TestJSONArgumentConversion:
             """Function with Dict[str, str] annotation."""
             return {"received": config, "type": type(config).__name__}
 
-        wrapped_func = _auto_convert_json_args(func_with_typed_dict)
+        wrapped_func = _wrap_with_json_conversion(func_with_typed_dict)
 
         # Test with JSON string (should be converted)
         result = wrapped_func(config='{"name": "test", "value": "data"}')
@@ -290,7 +290,7 @@ class TestJSONArgumentConversion:
             """Function that expects a dict."""
             return {"received": data, "type": type(data).__name__}
 
-        wrapped_func = _auto_convert_json_args(func_with_dict)
+        wrapped_func = _wrap_with_json_conversion(func_with_dict)
 
         # Test with invalid JSON (should pass string as-is)
         result = wrapped_func(data="invalid json {")
@@ -316,7 +316,7 @@ class TestJSONArgumentConversion:
                 "data_type": type(data).__name__
             }
 
-        wrapped_func = _auto_convert_json_args(mixed_func)
+        wrapped_func = _wrap_with_json_conversion(mixed_func)
 
         # Only the dict parameter should be converted
         result = wrapped_func(
@@ -341,7 +341,7 @@ class TestJSONArgumentConversion:
             await asyncio.sleep(0.001)  # Small delay
             return {"async_result": config, "type": type(config).__name__}
 
-        wrapped_func = _auto_convert_json_args(async_func_with_dict)
+        wrapped_func = _wrap_with_json_conversion(async_func_with_dict)
 
         # Test with JSON string (should be converted)
         result = await wrapped_func(config='{"async": true, "value": 123}')
@@ -355,7 +355,7 @@ class TestJSONArgumentConversion:
             """Function that processes nested dict data."""
             return {"processed": data}
 
-        wrapped_func = _auto_convert_json_args(func_with_nested_dict)
+        wrapped_func = _wrap_with_json_conversion(func_with_nested_dict)
 
         complex_json = '''{
             "users": [
@@ -388,7 +388,7 @@ class TestJSONArgumentConversion:
             """Original function with dict annotation."""
             return data
 
-        wrapped_func = _auto_convert_json_args(original_func)
+        wrapped_func = _wrap_with_json_conversion(original_func)
 
         # Check that annotations were modified to accept strings
         annotations = wrapped_func.__annotations__
@@ -435,7 +435,7 @@ class TestJSONSchemaModification:
                 }
             }
 
-        wrapped_func = _auto_convert_json_args(func_multiple_dicts)
+        wrapped_func = _wrap_with_json_conversion(func_multiple_dicts)
 
         result = wrapped_func(
             config='{"key1": "value1"}',
