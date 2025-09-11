@@ -234,7 +234,7 @@ class TestToolLoading:
         """Test loading non-existent functions from valid modules."""
         extension = MCPExtensionApp()
 
-        with pytest.raises(AttributeError, match="Function.*not found"):
+        with pytest.raises(AttributeError, match=r"Function.*not found"):
             extension._load_function_from_string("os:nonexistent_function")
 
     def test_load_function_with_nested_module(self):
