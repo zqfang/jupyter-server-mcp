@@ -47,9 +47,15 @@ def _auto_convert_json_args(func: Callable) -> Callable:
         if annotation is dict:
             return True
             
-        # Optional[dict] or Union[dict, None] etc.
+        # Optional[dict] or Union[dict, None] etc. (old typing.Union)
         origin = get_origin(annotation)
         if origin is Union:
+            args = get_args(annotation)
+            return dict in args
+            
+        # New Python 3.10+ union syntax: dict | None
+        if hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType':
+            # For dict | None style unions
             args = get_args(annotation)
             return dict in args
             
@@ -62,7 +68,7 @@ def _auto_convert_json_args(func: Callable) -> Callable:
         if annotation is dict:
             return dict | str
             
-        # Optional[dict] or Union[dict, None] etc.
+        # Optional[dict] or Union[dict, None] etc. (old typing.Union)
         origin = get_origin(annotation)
         if origin is Union:
             args = get_args(annotation)
@@ -70,6 +76,21 @@ def _auto_convert_json_args(func: Callable) -> Callable:
                 # Add str to the union if it's not already there
                 if str not in args:
                     return Union[(*tuple(args), str)]
+                return annotation
+        
+        # New Python 3.10+ union syntax: dict | None
+        if hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType':
+            args = get_args(annotation)
+            if dict in args:
+                # Add str to the union if it's not already there
+                if str not in args:
+                    # Reconstruct the union with str added
+                    new_args = (*tuple(args), str)
+                    # Create new union type
+                    result = new_args[0]
+                    for arg in new_args[1:]:
+                        result = result | arg
+                    return result
                 return annotation
             
         # Dict[K, V] style annotations -> annotation | str
@@ -175,8 +196,8 @@ def _modify_schema_for_json_string_support(func: Callable, tool) -> None:
                 # Direct dict annotation
                 if annotation is dict:
                     should_support_string = True
-                # Optional[dict] or Union[dict, None] etc.
-                elif get_origin(annotation) is Union:
+                # Optional[dict] or Union[dict, None] etc. (old typing.Union)
+                elif get_origin(annotation) is Union or (hasattr(annotation, '__class__') and annotation.__class__.__name__ == 'UnionType'):
                     args = get_args(annotation)
                     if dict in args:
                         should_support_string = True
