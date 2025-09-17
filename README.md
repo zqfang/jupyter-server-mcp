@@ -17,7 +17,7 @@ This extension provides a simplified, trait-based approach to exposing Jupyter f
 ## Installation
 
 ```bash
-pip install -e .
+pip install jupyter-server-mcp
 ```
 
 ## Quick Start
@@ -61,16 +61,33 @@ The MCP server will start automatically on `http://localhost:8080/mcp`.
 ### 3. Connect MCP Clients
 
 **Claude Code Configuration:**
+
+Set the following configuration:
+
+```json
+"mcpServers": {
+  "jupyter-mcp": {
+    "type": "http",
+    "url": "http://localhost:8085/mcp"
+  }
+}
+```
+
+Or use the `claude` CLI:
+
+```bash
+claude mcp add --transport http jupyter-mcp http://localhost:8080/mcp
+```
+
+**Gemini CLI Configuration:**
+
+Add the following to `.gemini/settings.json`:
+
 ```json
 {
   "mcpServers": {
     "jupyter-mcp": {
-      "command": "python", 
-      "args": ["-c", "pass"],
-      "transport": {
-        "type": "http",
-        "url": "http://localhost:8080/mcp"
-      }
+      "httpUrl": "http://localhost:8080/mcp"
     }
   }
 }
