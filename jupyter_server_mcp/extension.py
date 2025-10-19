@@ -10,6 +10,14 @@ from traitlets import Int, List, Unicode
 
 from .mcp_server import MCPServer
 
+# Import notebook execution tools for context setup
+try:
+    from . import notebook_execution_tools
+    NOTEBOOK_TOOLS_AVAILABLE = True
+except ImportError:
+    NOTEBOOK_TOOLS_AVAILABLE = False
+    notebook_execution_tools = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +118,11 @@ class MCPExtensionApp(ExtensionApp):
             self.log.info(
                 f"Starting MCP server '{self.mcp_name}' on port {self.mcp_port}"
             )
+
+            # Set server context for notebook execution tools
+            if NOTEBOOK_TOOLS_AVAILABLE:
+                notebook_execution_tools.set_server_context(self.serverapp)
+                self.log.info("Server context set for notebook execution tools")
 
             self.mcp_server_instance = MCPServer(
                 parent=self, name=self.mcp_name, port=self.mcp_port
