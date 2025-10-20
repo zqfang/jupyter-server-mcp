@@ -12,7 +12,6 @@ from typing import Any
 
 import nbformat
 from jupyter_client.kernelspec import KernelSpecManager
-from nbclient import NotebookClient
 from nbformat.notebooknode import from_dict
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
 
@@ -408,18 +407,23 @@ async def execute_notebook(
     notebook_path: str,
     kernel_name: str = "python3",
     timeout: int = 600,
-    output_path: str | None = None
+    output_path: str | None = None,
+    stop_on_error: bool = False
 ) -> dict[str, Any]:
     """Execute all cells in a Jupyter notebook.
 
     Runs all cells in the specified notebook file and optionally saves
     the executed notebook with outputs to a new file.
 
+    REFACTORED: Uses _execute_cell_by_position() (via execute_notebook_code pattern)
+    instead of NotebookClient.
+
     Args:
         notebook_path: Path to the notebook file to execute
         kernel_name: Name of the kernel to use (default: "python3")
         timeout: Maximum time in seconds per cell (default: 600)
         output_path: Optional path to save executed notebook. If None, overwrites original.
+        stop_on_error: If True, stop execution on first error (default: False)
 
     Returns:
         dict: A dictionary containing:
@@ -429,7 +433,9 @@ async def execute_notebook(
             - cells_executed: Number of cells executed
             - cells_total: Total number of code cells
             - execution_time: Total execution time in seconds
+            - kernel_id: ID of the kernel used
             - errors: List of errors encountered (if any)
+            - error_count: Number of errors (if any)
 
     Example:
         >>> result = await execute_notebook("analysis.ipynb", output_path="executed.ipynb")
@@ -440,10 +446,18 @@ async def execute_notebook(
             "output_path": "executed.ipynb",
             "cells_executed": 10,
             "cells_total": 10,
-            "execution_time": 5.23
+            "execution_time": 5.23,
+            "kernel_id": "abc123"
         }
     """
+    kernel_id = None
+    cells_executed = 0
+
     try:
+        # ===================================================================
+        # PHASE 1: VALIDATION & SETUP
+        # ===================================================================
+
         # Validate notebook path
         if not os.path.exists(notebook_path):
             return {
@@ -451,74 +465,179 @@ async def execute_notebook(
                 "status": "error"
             }
 
-        # Read the notebook
+        # Read the notebook to get cell positions
         logger.info(f"Reading notebook: {notebook_path}")
         nb = _read_notebook(notebook_path)
 
-        # Count code cells
-        code_cells = [cell for cell in nb.cells if cell.cell_type == "code"]
-        total_cells = len(code_cells)
+        # Find all code cells and their positions
+        code_cell_indices = [
+            i for i, cell in enumerate(nb.cells)
+            if cell.cell_type == "code"
+        ]
+        total_cells = len(code_cell_indices)
 
-        # Create notebook client
-        logger.info(f"Executing notebook with kernel: {kernel_name}")
-        client = NotebookClient(
-            nb,
-            timeout=timeout,
-            kernel_name=kernel_name,
-            resources={"metadata": {"path": os.path.dirname(os.path.abspath(notebook_path))}}
-        )
+        # Handle empty notebook
+        if total_cells == 0:
+            logger.info("No code cells to execute")
+            return {
+                "status": "completed",
+                "notebook_path": notebook_path,
+                "output_path": output_path or notebook_path,
+                "cells_executed": 0,
+                "cells_total": 0,
+                "execution_time": 0.0,
+                "message": "No code cells to execute"
+            }
 
-        # Execute the notebook
+        logger.info(f"Found {total_cells} code cells to execute")
+
+        # Initialize tracking
         start_time = time.time()
         errors = []
-        cells_executed = 0
         status = "completed"
 
-        try:
-            await client.async_execute()
-            cells_executed = total_cells
-        except Exception as e:
-            status = "error"
-            error_msg = str(e)
-            errors.append(error_msg)
-            logger.error(f"Error executing notebook: {e}")
+        # ===================================================================
+        # PHASE 2: KERNEL INITIALIZATION
+        # ===================================================================
 
-            # Try to determine how many cells were executed
-            for i, cell in enumerate(code_cells):
-                if cell.get("execution_count") is not None:
-                    cells_executed = i + 1
+        # Get server context
+        serverapp = get_server_context()
+        if serverapp is None:
+            return {
+                "error": "Server context not available",
+                "status": "error"
+            }
 
-            if cells_executed > 0:
-                status = "partial"
+        kernel_manager = serverapp.kernel_manager
 
+        # Check if notebook already has a tracked kernel
+        kernel_id = _get_tracked_kernel(notebook_path)
+
+        # If no tracked kernel, start one and track it
+        if kernel_id is None:
+            logger.info(f"Starting new kernel: {kernel_name}")
+            kernel_id = await kernel_manager.start_kernel(kernel_name=kernel_name)
+            _track_kernel(notebook_path, kernel_id)
+            logger.info(f"Started and tracked kernel: {kernel_id}")
+
+            # Wait for kernel to be ready
+            await asyncio.sleep(1)
+        else:
+            logger.info(f"Using existing tracked kernel: {kernel_id}")
+
+        # ===================================================================
+        # PHASE 3: EXECUTE ALL CODE CELLS
+        # Uses _execute_cell_by_position which handles notebook I/O per cell
+        # ===================================================================
+
+        for idx, cell_position in enumerate(code_cell_indices):
+            logger.info(f"Executing cell {idx + 1}/{total_cells} (position {cell_position})")
+
+            try:
+                # Use _execute_cell_by_position which:
+                # - Reads notebook
+                # - Executes cell via execute_cell()
+                # - Updates cell outputs
+                # - Saves notebook
+                result = await _execute_cell_by_position(
+                    notebook_path=notebook_path,
+                    position_index=cell_position,
+                    timeout=timeout
+                )
+
+                # Check execution result
+                if result.get("status") == "ok":
+                    cells_executed += 1
+                    logger.info(f"Cell {idx + 1} executed successfully")
+
+                elif result.get("status") == "error":
+                    cells_executed += 1
+
+                    # Track error
+                    error_info = {
+                        "cell_index": cell_position,
+                        "cell_number": idx + 1,
+                        "error": result.get("error", "Unknown error")
+                    }
+                    errors.append(error_info)
+                    logger.error(f"Cell {idx + 1} failed: {error_info['error']}")
+
+                    # Decide whether to continue or stop
+                    if stop_on_error:
+                        status = "partial"
+                        logger.info("Stopping execution after error (stop_on_error=True)")
+                        break
+                    else:
+                        status = "error"
+
+                # Track kernel_id from first execution
+                if kernel_id is None and result.get("kernel_id"):
+                    kernel_id = result.get("kernel_id")
+
+            except Exception as e:
+                # Unexpected exception during cell execution
+                cells_executed += 1
+                error_info = {
+                    "cell_index": cell_position,
+                    "cell_number": idx + 1,
+                    "error": f"Exception: {str(e)}",
+                    "exception_type": type(e).__name__
+                }
+                errors.append(error_info)
+                logger.error(f"Exception executing cell {idx + 1}: {e}")
+
+                if stop_on_error:
+                    status = "partial"
+                    break
+                else:
+                    status = "error"
+
+        # ===================================================================
+        # PHASE 4: FINALIZATION
+        # ===================================================================
+
+        # Calculate total execution time
         execution_time = time.time() - start_time
+        logger.info(f"Notebook execution complete: {cells_executed}/{total_cells} cells in {execution_time:.2f}s")
 
-        # Save the executed notebook
-        save_path = output_path or notebook_path
-        logger.info(f"Saving executed notebook to: {save_path}")
-        _write_notebook(save_path, nb)
+        # Handle output_path (copy if different from input)
+        final_output_path = output_path or notebook_path
+        if output_path and output_path != notebook_path:
+            import shutil
+            shutil.copy2(notebook_path, output_path)
+            logger.info(f"Copied executed notebook to: {output_path}")
 
+        # Build comprehensive result
         result = {
             "status": status,
             "notebook_path": notebook_path,
-            "output_path": save_path,
+            "output_path": final_output_path,
             "cells_executed": cells_executed,
             "cells_total": total_cells,
-            "execution_time": round(execution_time, 2)
+            "execution_time": round(execution_time, 2),
+            "kernel_id": kernel_id
         }
 
+        # Add errors if any
         if errors:
             result["errors"] = errors
+            result["error_count"] = len(errors)
 
-        logger.info(f"Notebook execution complete: {cells_executed}/{total_cells} cells")
+        logger.info(f"Notebook execution result: {result['status']}")
         return result
 
     except Exception as e:
+        # Top-level exception handler
         logger.error(f"Error in execute_notebook: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
         return {
             "error": str(e),
             "status": "error",
-            "notebook_path": notebook_path
+            "notebook_path": notebook_path,
+            "cells_executed": cells_executed,
+            "kernel_id": kernel_id
         }
 
 
@@ -961,6 +1080,54 @@ def _convert_outputs_to_notebook_nodes(outputs: list[dict]) -> list:
     return [from_dict(output) for output in outputs]
 
 
+def _filter_large_outputs(outputs: list[dict]) -> list[dict]:
+    """Filter large binary data from execution outputs to reduce MCP response size.
+
+    This prevents huge token counts when outputs contain base64-encoded images or
+    large HTML. The actual data is still saved to the notebook file, just not
+    transmitted in the MCP response.
+
+    Args:
+        outputs: List of output dicts from execute_cell
+
+    Returns:
+        List of filtered output dicts with large binary data replaced by placeholders
+    """
+    filtered_outputs = []
+
+    for output in outputs:
+        # Create a copy to avoid modifying the original
+        filtered_output = dict(output)
+
+        # Check if this output has data that might be large
+        if output.get("output_type") in ("display_data", "execute_result"):
+            data = output.get("data", {})
+            if data:
+                data_types = list(data.keys())
+
+                # Filter out large binary image data
+                if any("image" in dt or "png" in dt or "jpeg" in dt or "svg" in dt for dt in data_types):
+                    filtered_output["data"] = {
+                        "[filtered]": f"Image data present ({', '.join(data_types)}). Data saved to notebook but not transmitted to reduce token count."
+                    }
+                # Filter out large HTML
+                elif any("html" in dt for dt in data_types):
+                    # Keep text/plain if present, filter HTML
+                    filtered_data = {}
+                    for key, value in data.items():
+                        if "html" in key:
+                            filtered_data["[filtered]"] = f"HTML data present. Data saved to notebook but not transmitted to reduce token count."
+                        else:
+                            filtered_data[key] = value
+                    filtered_output["data"] = filtered_data if filtered_data else {
+                        "[filtered]": f"HTML data present ({', '.join(data_types)})"
+                    }
+
+        filtered_outputs.append(filtered_output)
+
+    return filtered_outputs
+
+
 def _get_available_execution_counts(nb) -> dict:
     """Get comprehensive cell information for better error messages.
 
@@ -1005,7 +1172,11 @@ def _get_available_execution_counts(nb) -> dict:
 
 
 def _filter_cell_outputs(cells: list) -> list[dict]:
-    """Filter out verbose output data from cells, keeping only source and basic metadata."""
+    """Filter out verbose output data from cells, keeping only source and basic metadata.
+
+    This function extracts cell structure and delegates output filtering to _filter_large_outputs
+    to avoid code duplication.
+    """
     filtered_cells = []
 
     for cell in cells:
@@ -1019,36 +1190,35 @@ def _filter_cell_outputs(cells: list) -> list[dict]:
         if cell.cell_type == "code":
             filtered_cell["execution_count"] = cell.get("execution_count")
 
-            # Keep outputs but filter out large base64 data
+            # Convert NotebookNode outputs to dicts and filter using _filter_large_outputs
             if hasattr(cell, "outputs") and cell.outputs:
-                filtered_outputs = []
+                # Convert NotebookNode outputs to plain dicts
+                output_dicts = []
                 for output in cell.outputs:
-                    filtered_output = {"output_type": output.output_type}
+                    output_dict = {"output_type": output.output_type}
 
-                    # Keep text outputs but filter images and large data
+                    # Copy relevant attributes to dict
                     if hasattr(output, "text"):
-                        filtered_output["text"] = output.text
+                        output_dict["text"] = output.text
                     if hasattr(output, "name"):
-                        filtered_output["name"] = output.name
-
-                    # For data outputs, indicate presence without including content
+                        output_dict["name"] = output.name
                     if hasattr(output, "data"):
-                        data_types = list(output.data.keys())
-                        if any("image" in dt or "png" in dt or "jpeg" in dt for dt in data_types):
-                            filtered_output["data"] = {
-                                "[filtered]": f"Image data present ({', '.join(data_types)})"
-                            }
-                        elif any("html" in dt for dt in data_types):
-                            filtered_output["data"] = {
-                                "[filtered]": f"HTML data present ({', '.join(data_types)})"
-                            }
-                        else:
-                            # Keep small text data
-                            filtered_output["data"] = dict(output.data)
+                        output_dict["data"] = dict(output.data)
+                    if hasattr(output, "metadata"):
+                        output_dict["metadata"] = dict(output.metadata)
+                    if hasattr(output, "execution_count"):
+                        output_dict["execution_count"] = output.execution_count
+                    if hasattr(output, "ename"):
+                        output_dict["ename"] = output.ename
+                    if hasattr(output, "evalue"):
+                        output_dict["evalue"] = output.evalue
+                    if hasattr(output, "traceback"):
+                        output_dict["traceback"] = output.traceback
 
-                    filtered_outputs.append(filtered_output)
+                    output_dicts.append(output_dict)
 
-                filtered_cell["outputs"] = filtered_outputs
+                # Use _filter_large_outputs to filter the converted dicts
+                filtered_cell["outputs"] = _filter_large_outputs(output_dicts)
 
         filtered_cells.append(filtered_cell)
 
@@ -1180,7 +1350,8 @@ async def _modify_add_code_cell(
             results["status"] = exec_results.get("status")
             results["kernel_id"] = exec_results.get("kernel_id")
             results["execution_count"] = exec_results.get("execution_count")
-            results["outputs"] = exec_results.get("outputs", [])
+            # Filter large outputs to reduce MCP response token count
+            results["outputs"] = _filter_large_outputs(exec_results.get("outputs", []))
             results["started_new_kernel"] = exec_results.get("started_new_kernel", False)
             if "error" in exec_results:
                 results["error"] = exec_results.get("error")
@@ -1198,10 +1369,12 @@ async def _modify_add_code_cell(
                 exec_count = results.get("execution_count")
                 if exec_count is not None:
                     cell.execution_count = exec_count
-                outputs = results.get("outputs")
-                if outputs:
+                # IMPORTANT: Save UNFILTERED outputs to notebook (from exec_results, not results)
+                # so that plots and images are preserved in the .ipynb file
+                unfiltered_outputs = exec_results.get("outputs", [])
+                if unfiltered_outputs:
                     # Convert dict outputs to NotebookNode objects
-                    cell.outputs = _convert_outputs_to_notebook_nodes(outputs)
+                    cell.outputs = _convert_outputs_to_notebook_nodes(unfiltered_outputs)
             else:
                 logger.warning(f"Cell index {inserted_index} out of range after reading notebook")
 
@@ -1283,7 +1456,8 @@ async def _modify_edit_code_cell(
             results["status"] = exec_results.get("status")
             results["kernel_id"] = exec_results.get("kernel_id")
             results["execution_count"] = exec_results.get("execution_count")
-            results["outputs"] = exec_results.get("outputs", [])
+            # Filter large outputs to reduce MCP response token count
+            results["outputs"] = _filter_large_outputs(exec_results.get("outputs", []))
             results["started_new_kernel"] = exec_results.get("started_new_kernel", False)
             if "error" in exec_results:
                 results["error"] = exec_results.get("error")
@@ -1300,10 +1474,12 @@ async def _modify_edit_code_cell(
                 exec_count = results.get("execution_count")
                 if exec_count is not None:
                     cell.execution_count = exec_count
-                outputs = results.get("outputs")
-                if outputs:
+                # IMPORTANT: Save UNFILTERED outputs to notebook (from exec_results, not results)
+                # so that plots and images are preserved in the .ipynb file
+                unfiltered_outputs = exec_results.get("outputs", [])
+                if unfiltered_outputs:
                     # Convert dict outputs to NotebookNode objects
-                    cell.outputs = _convert_outputs_to_notebook_nodes(outputs)
+                    cell.outputs = _convert_outputs_to_notebook_nodes(unfiltered_outputs)
             else:
                 logger.warning(f"Cell index {position_index} out of range after reading notebook")
 
@@ -1521,7 +1697,7 @@ async def execute_notebook_code(
         )
 
 
-async def _execute_cell_by_position(notebook_path: str, position_index: int) -> dict:
+async def _execute_cell_by_position(notebook_path: str, position_index: int, timeout: int = 30) -> dict:
     """Execute an existing code cell in a Jupyter notebook by position.
 
     In most cases you should call modify_notebook_cells instead, but occasionally
@@ -1562,7 +1738,7 @@ async def _execute_cell_by_position(notebook_path: str, position_index: int) -> 
 
     try:
         # Execute the cell and await the result
-        result = await execute_cell(cell.source, kernel_id=kernel_id)
+        result = await execute_cell(cell.source, kernel_id=kernel_id, timeout=timeout)
 
         # Ensure result is a dict
         if not isinstance(result, dict):
@@ -1592,6 +1768,8 @@ async def _execute_cell_by_position(notebook_path: str, position_index: int) -> 
         # Save the notebook
         _write_notebook(notebook_path, nb)
 
+        # Filter outputs in the returned result to reduce MCP response token count
+        result["outputs"] = _filter_large_outputs(result.get("outputs", []))
         return result
 
     except Exception as e:
