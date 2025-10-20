@@ -73,10 +73,11 @@ class MockKernel:
         self.last_activity = datetime.now()
         self.execution_state = "idle"
         self.connection_count = 0
+        self._client = MockKernelClient()  # Persistent client to maintain execution_count
 
     def client(self):
         """Return a mock client."""
-        return MockKernelClient()
+        return self._client
 
 
 class MockKernelClient:
@@ -85,6 +86,8 @@ class MockKernelClient:
     def __init__(self):
         self.channels_started = False
         self.execution_count = 1
+        self._current_msg_id = None
+        self._shell_messages = []
 
     def start_channels(self):
         """Mock start channels."""
@@ -99,15 +102,46 @@ class MockKernelClient:
         await asyncio.sleep(0.01)
 
     def execute(self, code):
-        """Mock execute."""
-        return "msg-id-123"
+        """Mock execute - prepares shell reply with execution_count."""
+        msg_id = f"msg-id-{self.execution_count}"
+        self._current_msg_id = msg_id
 
-    def get_iopub_msg(self):
+        # Queue the execute_reply for shell channel
+        # This always contains execution_count per Jupyter protocol
+        self._shell_messages.append({
+            "header": {
+                "msg_type": "execute_reply",
+                "msg_id": f"reply-{self.execution_count}"
+            },
+            "parent_header": {"msg_id": msg_id},
+            "content": {
+                "status": "ok",
+                "execution_count": self.execution_count
+            }
+        })
+
+        exec_count = self.execution_count
+        self.execution_count += 1
+        return msg_id
+
+    async def get_shell_msg(self, timeout=None):
+        """Mock get shell message - returns execute_reply."""
+        await asyncio.sleep(0.01)  # Simulate async
+
+        if self._shell_messages:
+            return self._shell_messages.pop(0)
+
+        # No messages available
+        raise asyncio.TimeoutError("No shell messages available")
+
+    async def get_iopub_msg(self, timeout=None):
         """Mock get iopub message."""
+        await asyncio.sleep(0.01)  # Simulate async
+
         # Simulate execution complete
         return {
             "header": {"msg_type": "status", "msg_id": "msg-id-456"},
-            "parent_header": {"msg_id": "msg-id-123"},
+            "parent_header": {"msg_id": self._current_msg_id or "msg-id-123"},
             "content": {"execution_state": "idle"},
         }
 
@@ -307,6 +341,62 @@ class TestExecuteCell:
             assert "kernel_id" in result
             assert result["started_new_kernel"] is True
 
+    @pytest.mark.asyncio
+    async def test_execute_cell_captures_execution_count_from_shell(self, mock_serverapp):
+        """Test that execution_count is captured from shell channel execute_reply.
+
+        This test verifies the fix for the issue where execution_count was not
+        being updated in notebook files. The execute_reply on the shell channel
+        ALWAYS contains execution_count, unlike execute_result on iopub which
+        only exists when code produces a result.
+        """
+        set_server_context(mock_serverapp)
+
+        # Execute code that only produces stream output (no execute_result)
+        # This was the problematic case - execution_count would be null
+        code = "print('Hello, World!')"
+
+        result = await execute_cell(code, kernel_name="python3")
+
+        # Verify execution_count was captured from shell reply
+        assert result["status"] == "ok"
+        assert result["execution_count"] == 1, "execution_count should be 1 from shell reply"
+        assert result["execution_count"] is not None, "execution_count should never be None"
+
+    @pytest.mark.asyncio
+    async def test_execute_cell_increments_execution_count(self, mock_serverapp):
+        """Test that execution_count increments with each execution."""
+        set_server_context(mock_serverapp)
+
+        # Start a kernel first
+        kernel_id = await mock_serverapp.kernel_manager.start_kernel()
+
+        # Execute multiple cells and verify count increments
+        result1 = await execute_cell("x = 1", kernel_id=kernel_id)
+        assert result1["execution_count"] == 1
+
+        result2 = await execute_cell("x = 2", kernel_id=kernel_id)
+        assert result2["execution_count"] == 2
+
+        result3 = await execute_cell("x = 3", kernel_id=kernel_id)
+        assert result3["execution_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_execute_cell_with_only_print_has_execution_count(self, mock_serverapp):
+        """Test that code with only print statements gets execution_count.
+
+        This is a regression test for the bug where execution_count was null
+        for cells that only produced stream output (no execute_result).
+        """
+        set_server_context(mock_serverapp)
+
+        # Code with only print (no return value)
+        result = await execute_cell("print('test')", kernel_name="python3")
+
+        # Should have execution_count even though there's no execute_result
+        assert result["execution_count"] is not None
+        assert result["execution_count"] >= 1
+
 
 class TestExecuteNotebook:
     """Test execute_notebook function."""
@@ -319,17 +409,16 @@ class TestExecuteNotebook:
         assert "not found" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_execute_notebook_empty(self, temp_notebook):
+    async def test_execute_notebook_empty(self, temp_notebook, mock_serverapp):
         """Test executing empty notebook."""
-        with patch("jupyter_server_mcp.notebook_execution_tools.NotebookClient") as mock_client_class:
-            mock_client = Mock()
-            mock_client.async_execute = AsyncMock()
-            mock_client_class.return_value = mock_client
+        set_server_context(mock_serverapp)
 
-            result = await execute_notebook(temp_notebook)
-            assert result["status"] == "completed"
-            assert result["cells_executed"] == 0
-            assert result["cells_total"] == 0
+        result = await execute_notebook(temp_notebook)
+        assert result["status"] == "completed"
+        assert result["cells_executed"] == 0
+        assert result["cells_total"] == 0
+        assert "message" in result
+        assert "No code cells" in result["message"]
 
 
 class TestShutdownKernel:
@@ -558,3 +647,53 @@ class TestQueryNotebook:
         """Test invalid query type."""
         with pytest.raises(ValueError, match="Invalid query_type"):
             await query_notebook(temp_notebook, "invalid_type")
+
+
+@pytest.mark.asyncio
+async def test_filter_large_outputs():
+    """Test that _filter_large_outputs properly filters image data."""
+    from jupyter_server_mcp.notebook_execution_tools import _filter_large_outputs
+
+    # Create mock outputs with large image data
+    outputs = [
+        {
+            "output_type": "stream",
+            "name": "stdout",
+            "text": "Hello World\n"
+        },
+        {
+            "output_type": "display_data",
+            "data": {
+                "text/plain": "Plot",
+                "image/png": "iVBORw0KGgoAAAANS..." * 1000  # Simulated large base64 data
+            }
+        },
+        {
+            "output_type": "execute_result",
+            "data": {
+                "text/html": "<div>Large HTML content...</div>" * 100
+            },
+            "execution_count": 1
+        }
+    ]
+
+    # Filter the outputs
+    filtered = _filter_large_outputs(outputs)
+
+    # Verify filtering
+    assert len(filtered) == 3
+
+    # Stream output should be unchanged
+    assert filtered[0]["output_type"] == "stream"
+    assert filtered[0]["text"] == "Hello World\n"
+
+    # Image data should be filtered
+    assert filtered[1]["output_type"] == "display_data"
+    assert "[filtered]" in filtered[1]["data"]
+    assert "image/png" in filtered[1]["data"]["[filtered]"]
+    assert "text/plain" not in filtered[1]["data"]  # All data replaced with placeholder
+
+    # HTML data should be filtered
+    assert filtered[2]["output_type"] == "execute_result"
+    assert "[filtered]" in filtered[2]["data"]
+    assert "execution_count" in filtered[2]  # Metadata preserved

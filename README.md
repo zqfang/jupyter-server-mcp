@@ -18,9 +18,32 @@ This extension provides a simplified, trait-based approach to exposing Jupyter f
 
 ## Installation
 
+### Option 1: Standard Installation
+
 ```bash
 pip install jupyter-server-mcp
 ```
+
+### Option 2: Development Setup with uv (Recommended)
+
+For faster dependency installation and development:
+
+```bash
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone the repository
+git clone https://github.com/yourusername/jupyter-server-mcp.git
+cd jupyter-server-mcp
+
+# Run the setup script
+./setup.sh
+
+# Start Jupyter Lab
+./start-jupyter.sh
+```
+
+See [SETUP_UV.md](SETUP_UV.md) for detailed instructions.
 
 ## Quick Start
 
