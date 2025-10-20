@@ -49,21 +49,23 @@ c.MCPExtensionApp.mcp_tools = [
     "os:getcwd",
     "json:dumps",
     "time:time",
-    
-    # Jupyter AI Tools - Notebook operations  
-    "jupyter_ai_tools.toolkits.notebook:read_notebook",
-    "jupyter_ai_tools.toolkits.notebook:edit_cell",
-    
-    # JupyterLab Commands Toolkit
-    "jupyterlab_commands_toolkit.tools:list_all_commands",
-    "jupyterlab_commands_toolkit.tools:execute_command",
+
+    # Notebook execution and kernel management tools
+    "jupyter_server_mcp.notebook_execution_tools:list_running_kernels",
+    "jupyter_server_mcp.notebook_execution_tools:list_available_kernels",
+    "jupyter_server_mcp.notebook_execution_tools:execute_notebook_code",
+    "jupyter_server_mcp.notebook_execution_tools:setup_notebook",
+    "jupyter_server_mcp.notebook_execution_tools:switch_notebook_kernel",
+    "jupyter_server_mcp.notebook_execution_tools:shutdown_notebook",
+    "jupyter_server_mcp.notebook_execution_tools:modify_notebook_cells",
+    "jupyter_server_mcp.notebook_execution_tools:query_notebook"
 ]
 ```
 
 ### 2. Start Jupyter Server
 
 ```bash
-jupyter lab --config=jupyter_config.py
+jupyter lab --config examples/jupyter_config_with_excution_tools.py
 ```
 
 The MCP server will start automatically on `http://localhost:8080/mcp`.
