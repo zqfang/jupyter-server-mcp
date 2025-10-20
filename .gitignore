@@ -213,3 +213,4 @@ __marimo__/
 # misc
 .virtual_documents
 .DS_Store
+.jupyter_ystore.db
