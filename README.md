@@ -28,22 +28,7 @@ pip install jupyter-server-mcp
 
 For faster dependency installation and development:
 
-```bash
-# Install uv if you haven't already
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone the repository
-git clone https://github.com/yourusername/jupyter-server-mcp.git
-cd jupyter-server-mcp
-
-# Run the setup script
-./setup.sh
-
-# Start Jupyter Lab
-./start-jupyter.sh
-```
-
-See [SETUP_UV.md](SETUP_UV.md) for detailed instructions.
+See [INSTALL.md](INSTALL.md) for detailed instructions.
 
 ## Quick Start
 
@@ -93,7 +78,7 @@ Set the following configuration:
 "mcpServers": {
   "jupyter-mcp": {
     "type": "http",
-    "url": "http://localhost:8085/mcp"
+    "url": "http://localhost:8080/mcp"
   }
 }
 ```
