@@ -71,6 +71,9 @@ uv pip install -e ".[test]"
 # Or install with dev dependencies (includes ruff linter)
 uv pip install -e ".[dev]"
 
+
+# Run jupyter
+jupyter lab --no-browser --autoreload --config examples/jupyter_config_with_excution_tools.py
 ```
 
 ## Verifying Installation
