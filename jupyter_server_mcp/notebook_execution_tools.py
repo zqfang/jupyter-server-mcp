@@ -7,17 +7,17 @@ import asyncio
 import inspect
 import logging
 import os
-import time
 from typing import Any
 
 import nbformat
-from jupyter_client.kernelspec import KernelSpecManager
 from nbformat.notebooknode import from_dict
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
 
 logger = logging.getLogger(__name__)
 
 # Global context to store the Jupyter ServerApp instance
+# This global variable will be set when the MCP extension is initialized
+# see extension.py
 _server_context = {"serverapp": None}
 
 # Track active kernels per notebook to support multi-kernel workflows
@@ -198,13 +198,19 @@ async def list_available_kernels() -> dict[str, Any]:
         ...     print("Python 3 kernel is available!")
     """
     try:
-        # Create KernelSpecManager to access installed kernel specifications
-        ksm = KernelSpecManager()
+        # Try to use server context first for better integration
+        serverapp = get_server_context()
+        if serverapp is not None:
+            ksm = serverapp.kernel_spec_manager
+        else:
+            # Fallback to standalone KernelSpecManager if server context not available
+            from jupyter_client.kernelspec import KernelSpecManager
+            ksm = KernelSpecManager()
 
         # Get all kernel specs
         all_specs = ksm.get_all_specs()
-
-        # Format the output to be more user-friendly
+        
+        # Format the specs for output
         kernelspecs = {}
         for kernel_name, spec_info in all_specs.items():
             kernelspecs[kernel_name] = {
@@ -212,12 +218,12 @@ async def list_available_kernels() -> dict[str, Any]:
                 "resource_dir": spec_info.get("resource_dir", ""),
                 "spec": spec_info.get("spec", {})
             }
-
-        logger.info(f"Found {len(kernelspecs)} available kernel specifications")
+        
+        logger.info(f"Listed {len(kernelspecs)} available kernel specifications")
         return {"kernelspecs": kernelspecs}
 
     except Exception as e:
-        logger.error(f"Error listing available kernels: {e}")
+        logger.error(f"Error listing kernel specifications: {e}")
         return {"error": str(e), "kernelspecs": {}}
 
 
@@ -442,312 +448,6 @@ async def execute_cell(
             "kernel_id": kernel_id,
             "started_new_kernel": started_kernel
         }
-
-
-async def execute_notebook(
-    notebook_path: str,
-    kernel_name: str = "python3",
-    timeout: int = 600,
-    output_path: str | None = None,
-    stop_on_error: bool = False
-) -> dict[str, Any]:
-    """Execute all cells in a Jupyter notebook.
-
-    Runs all cells in the specified notebook file and optionally saves
-    the executed notebook with outputs to a new file.
-
-    REFACTORED: Uses _execute_cell_by_position() (via execute_notebook_code pattern)
-    instead of NotebookClient.
-
-    Args:
-        notebook_path: Path to the notebook file to execute
-        kernel_name: Name of the kernel to use (default: "python3")
-        timeout: Maximum time in seconds per cell (default: 600)
-        output_path: Optional path to save executed notebook. If None, overwrites original.
-        stop_on_error: If True, stop execution on first error (default: False)
-
-    Returns:
-        dict: A dictionary containing:
-            - status: "completed", "error", or "partial"
-            - notebook_path: Path to the original notebook
-            - output_path: Path where executed notebook was saved
-            - cells_executed: Number of cells executed
-            - cells_total: Total number of code cells
-            - execution_time: Total execution time in seconds
-            - kernel_id: ID of the kernel used
-            - errors: List of errors encountered (if any)
-            - error_count: Number of errors (if any)
-
-    Example:
-        >>> result = await execute_notebook("analysis.ipynb", output_path="executed.ipynb")
-        >>> print(result)
-        {
-            "status": "completed",
-            "notebook_path": "analysis.ipynb",
-            "output_path": "executed.ipynb",
-            "cells_executed": 10,
-            "cells_total": 10,
-            "execution_time": 5.23,
-            "kernel_id": "abc123"
-        }
-    """
-    kernel_id = None
-    cells_executed = 0
-
-    try:
-        # ===================================================================
-        # PHASE 1: VALIDATION & SETUP
-        # ===================================================================
-
-        # Validate notebook path
-        if not os.path.exists(notebook_path):
-            return {
-                "error": f"Notebook not found: {notebook_path}",
-                "status": "error"
-            }
-
-        # Read the notebook to get cell positions
-        logger.info(f"Reading notebook: {notebook_path}")
-        nb = _read_notebook(notebook_path)
-
-        # Find all code cells and their positions
-        code_cell_indices = [
-            i for i, cell in enumerate(nb.cells)
-            if cell.cell_type == "code"
-        ]
-        total_cells = len(code_cell_indices)
-
-        # Handle empty notebook
-        if total_cells == 0:
-            logger.info("No code cells to execute")
-            return {
-                "status": "completed",
-                "notebook_path": notebook_path,
-                "output_path": output_path or notebook_path,
-                "cells_executed": 0,
-                "cells_total": 0,
-                "execution_time": 0.0,
-                "message": "No code cells to execute"
-            }
-
-        logger.info(f"Found {total_cells} code cells to execute")
-
-        # Initialize tracking
-        start_time = time.time()
-        errors = []
-        status = "completed"
-
-        # ===================================================================
-        # PHASE 2: KERNEL INITIALIZATION
-        # ===================================================================
-
-        # Get server context
-        serverapp = get_server_context()
-        if serverapp is None:
-            return {
-                "error": "Server context not available",
-                "status": "error"
-            }
-
-        kernel_manager = serverapp.kernel_manager
-
-        # Check if notebook already has a tracked kernel
-        kernel_id = _get_tracked_kernel(notebook_path)
-
-        # If no tracked kernel, start one and track it
-        if kernel_id is None:
-            logger.info(f"Starting new kernel: {kernel_name}")
-            kernel_id = await kernel_manager.start_kernel(kernel_name=kernel_name)
-            _track_kernel(notebook_path, kernel_id)
-            logger.info(f"Started and tracked kernel: {kernel_id}")
-
-            # Wait for kernel to be ready
-            await asyncio.sleep(1)
-        else:
-            logger.info(f"Using existing tracked kernel: {kernel_id}")
-
-        # ===================================================================
-        # PHASE 3: EXECUTE ALL CODE CELLS
-        # Uses _execute_cell_by_position which handles notebook I/O per cell
-        # ===================================================================
-
-        for idx, cell_position in enumerate(code_cell_indices):
-            logger.info(f"Executing cell {idx + 1}/{total_cells} (position {cell_position})")
-
-            try:
-                # Use _execute_cell_by_position which:
-                # - Reads notebook
-                # - Executes cell via execute_cell()
-                # - Updates cell outputs
-                # - Saves notebook
-                result = await _execute_cell_by_position(
-                    notebook_path=notebook_path,
-                    position_index=cell_position,
-                    timeout=timeout
-                )
-
-                # Check execution result
-                if result.get("status") == "ok":
-                    cells_executed += 1
-                    logger.info(f"Cell {idx + 1} executed successfully")
-
-                elif result.get("status") == "error":
-                    cells_executed += 1
-
-                    # Track error
-                    error_info = {
-                        "cell_index": cell_position,
-                        "cell_number": idx + 1,
-                        "error": result.get("error", "Unknown error")
-                    }
-                    errors.append(error_info)
-                    logger.error(f"Cell {idx + 1} failed: {error_info['error']}")
-
-                    # Decide whether to continue or stop
-                    if stop_on_error:
-                        status = "partial"
-                        logger.info("Stopping execution after error (stop_on_error=True)")
-                        break
-                    else:
-                        status = "error"
-
-                # Track kernel_id from first execution
-                if kernel_id is None and result.get("kernel_id"):
-                    kernel_id = result.get("kernel_id")
-
-            except Exception as e:
-                # Unexpected exception during cell execution
-                cells_executed += 1
-                error_info = {
-                    "cell_index": cell_position,
-                    "cell_number": idx + 1,
-                    "error": f"Exception: {str(e)}",
-                    "exception_type": type(e).__name__
-                }
-                errors.append(error_info)
-                logger.error(f"Exception executing cell {idx + 1}: {e}")
-
-                if stop_on_error:
-                    status = "partial"
-                    break
-                else:
-                    status = "error"
-
-        # ===================================================================
-        # PHASE 4: FINALIZATION
-        # ===================================================================
-
-        # Calculate total execution time
-        execution_time = time.time() - start_time
-        logger.info(f"Notebook execution complete: {cells_executed}/{total_cells} cells in {execution_time:.2f}s")
-
-        # Handle output_path (copy if different from input)
-        final_output_path = output_path or notebook_path
-        if output_path and output_path != notebook_path:
-            import shutil
-            shutil.copy2(notebook_path, output_path)
-            logger.info(f"Copied executed notebook to: {output_path}")
-
-        # Build comprehensive result
-        result = {
-            "status": status,
-            "notebook_path": notebook_path,
-            "output_path": final_output_path,
-            "cells_executed": cells_executed,
-            "cells_total": total_cells,
-            "execution_time": round(execution_time, 2),
-            "kernel_id": kernel_id
-        }
-
-        # Add errors if any
-        if errors:
-            result["errors"] = errors
-            result["error_count"] = len(errors)
-
-        logger.info(f"Notebook execution result: {result['status']}")
-        return result
-
-    except Exception as e:
-        # Top-level exception handler
-        logger.error(f"Error in execute_notebook: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-
-        return {
-            "error": str(e),
-            "status": "error",
-            "notebook_path": notebook_path,
-            "cells_executed": cells_executed,
-            "kernel_id": kernel_id
-        }
-
-
-async def shutdown_kernel(kernel_id: str) -> dict[str, Any]:
-    """Shutdown a running Jupyter kernel.
-
-    Stops and removes the specified kernel from the kernel manager.
-
-    This deletes any active Jupyter session(s) for the given notebook and stops the
-    corresponding local KernelClient, ensuring a clean slate before switching
-    kernels or performing other operations.
-
-    Args:
-        kernel_id: The ID of the kernel to shutdown
-
-    Returns:
-        dict: A dictionary containing:
-            - status: "shutdown" or "error"
-            - kernel_id: The ID of the kernel
-            - message: Status message
-            - error: Error message if shutdown failed
-
-    Example:
-        >>> result = await shutdown_kernel("abc123")
-        >>> print(result)
-        {
-            "status": "shutdown",
-            "kernel_id": "abc123",
-            "message": "Kernel shutdown successfully"
-        }
-    """
-    serverapp = get_server_context()
-    if serverapp is None:
-        return {
-            "error": "Server context not available",
-            "status": "error",
-            "kernel_id": kernel_id
-        }
-
-    try:
-        kernel_manager = serverapp.kernel_manager
-
-        # Check if kernel exists
-        if kernel_id not in kernel_manager.list_kernel_ids():
-            return {
-                "error": f"Kernel not found: {kernel_id}",
-                "status": "error",
-                "kernel_id": kernel_id
-            }
-
-        # Shutdown the kernel
-        logger.info(f"Shutting down kernel: {kernel_id}")
-        await kernel_manager.shutdown_kernel(kernel_id)
-
-        return {
-            "status": "shutdown",
-            "kernel_id": kernel_id,
-            "message": "Kernel shutdown successfully"
-        }
-
-    except Exception as e:
-        logger.error(f"Error shutting down kernel {kernel_id}: {e}")
-        return {
-            "error": str(e),
-            "status": "error",
-            "kernel_id": kernel_id
-        }
-
-
 
 
 async def shutdown_notebook(
