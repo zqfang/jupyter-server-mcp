@@ -597,8 +597,8 @@ class TestQueryNotebook:
 
 @pytest.mark.asyncio
 async def test_filter_large_outputs():
-    """Test that _filter_large_outputs properly filters image data."""
-    from jupyter_server_mcp.notebook_execution_tools import _filter_large_outputs
+    """Test that _filter_output_dicts properly filters image data."""
+    from jupyter_server_mcp.notebook_execution_tools import _filter_output_dicts
 
     # Create mock outputs with large image data
     outputs = [
@@ -624,7 +624,7 @@ async def test_filter_large_outputs():
     ]
 
     # Filter the outputs
-    filtered = _filter_large_outputs(outputs)
+    filtered = _filter_output_dicts(outputs)
 
     # Verify filtering
     assert len(filtered) == 3

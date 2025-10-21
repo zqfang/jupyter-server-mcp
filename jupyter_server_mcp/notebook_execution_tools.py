@@ -907,55 +907,6 @@ def _convert_outputs_to_notebook_nodes(outputs: list[dict]) -> list:
     """
     return [from_dict(output) for output in outputs]
 
-
-def _filter_large_outputs(outputs: list[dict]) -> list[dict]:
-    """Filter large binary data from execution outputs to reduce MCP response size.
-
-    This prevents huge token counts when outputs contain base64-encoded images or
-    large HTML. The actual data is still saved to the notebook file, just not
-    transmitted in the MCP response.
-
-    Args:
-        outputs: List of output dicts from execute_cell
-
-    Returns:
-        List of filtered output dicts with large binary data replaced by placeholders
-    """
-    filtered_outputs = []
-
-    for output in outputs:
-        # Create a copy to avoid modifying the original
-        filtered_output = dict(output)
-
-        # Check if this output has data that might be large
-        if output.get("output_type") in ("display_data", "execute_result"):
-            data = output.get("data", {})
-            if data:
-                data_types = list(data.keys())
-
-                # Filter out large binary image data
-                if any("image" in dt or "png" in dt or "jpeg" in dt or "svg" in dt for dt in data_types):
-                    filtered_output["data"] = {
-                        "[filtered]": f"Image data present ({', '.join(data_types)}). Data saved to notebook but not transmitted to reduce token count."
-                    }
-                # Filter out large HTML
-                elif any("html" in dt for dt in data_types):
-                    # Keep text/plain if present, filter HTML
-                    filtered_data = {}
-                    for key, value in data.items():
-                        if "html" in key:
-                            filtered_data["[filtered]"] = f"HTML data present. Data saved to notebook but not transmitted to reduce token count."
-                        else:
-                            filtered_data[key] = value
-                    filtered_output["data"] = filtered_data if filtered_data else {
-                        "[filtered]": f"HTML data present ({', '.join(data_types)})"
-                    }
-
-        filtered_outputs.append(filtered_output)
-
-    return filtered_outputs
-
-
 def _get_available_execution_counts(nb) -> dict:
     """Get comprehensive cell information for better error messages.
 
@@ -999,11 +950,67 @@ def _get_available_execution_counts(nb) -> dict:
     return cells_info
 
 
+def _filter_output_dicts(outputs: list[dict]) -> list[dict]:
+    """Filter large binary data from output dicts to reduce MCP response size.
+    
+    This is used when we already have plain dict outputs (e.g., from execute_cell)
+    and need to filter them before returning in MCP response. This prevents huge
+    token counts when outputs contain base64-encoded images or large HTML. The actual
+    data is still saved to the notebook file, just not transmitted in the MCP response.
+    
+    Args:
+        outputs: List of output dicts
+        
+    Returns:
+        List of filtered output dicts with large binary data replaced by placeholders
+    """
+    filtered_outputs = []
+    
+    for output in outputs:
+        # Create a copy to avoid modifying the original
+        filtered_output = dict(output)
+        
+        # Check if this output has data that might be large
+        if output.get("output_type") in ("display_data", "execute_result"):
+            data = output.get("data", {})
+            if data:
+                data_types = list(data.keys())
+                
+                # Filter out large binary image data
+                if any("image" in dt or "png" in dt or "jpeg" in dt or "svg" in dt for dt in data_types):
+                    filtered_output["data"] = {
+                        "[filtered]": f"Image data present ({', '.join(data_types)}). Data saved to notebook but not transmitted to reduce token count."
+                    }
+                # Filter out large HTML
+                elif any("html" in dt for dt in data_types):
+                    # Keep text/plain if present, filter HTML
+                    filtered_data = {}
+                    for key, value in data.items():
+                        if "html" in key:
+                            filtered_data["[filtered]"] = f"HTML data present. Data saved to notebook but not transmitted to reduce token count."
+                        else:
+                            filtered_data[key] = value
+                    filtered_output["data"] = filtered_data if filtered_data else {
+                        "[filtered]": f"HTML data present ({', '.join(data_types)})"
+                    }
+        
+        filtered_outputs.append(filtered_output)
+    
+    return filtered_outputs
+
+
 def _filter_cell_outputs(cells: list) -> list[dict]:
     """Filter out verbose output data from cells, keeping only source and basic metadata.
 
-    This function extracts cell structure and delegates output filtering to _filter_large_outputs
-    to avoid code duplication.
+    This prevents huge token counts when outputs contain base64-encoded images or
+    large HTML. The actual data is still saved to the notebook file, just not
+    transmitted in the MCP response.
+    
+    Args:
+        cells: List of notebook cells (can be NotebookNode objects or plain dicts)
+
+    Returns:
+        List of filtered cell dicts with large binary data replaced by placeholders
     """
     filtered_cells = []
 
@@ -1018,11 +1025,12 @@ def _filter_cell_outputs(cells: list) -> list[dict]:
         if cell.cell_type == "code":
             filtered_cell["execution_count"] = cell.get("execution_count")
 
-            # Convert NotebookNode outputs to dicts and filter using _filter_large_outputs
+            # Convert NotebookNode outputs to dicts and filter large data
             if hasattr(cell, "outputs") and cell.outputs:
-                # Convert NotebookNode outputs to plain dicts
-                output_dicts = []
+                filtered_outputs = []
+                
                 for output in cell.outputs:
+                    # Convert NotebookNode to dict
                     output_dict = {"output_type": output.output_type}
 
                     # Copy relevant attributes to dict
@@ -1030,10 +1038,6 @@ def _filter_cell_outputs(cells: list) -> list[dict]:
                         output_dict["text"] = output.text
                     if hasattr(output, "name"):
                         output_dict["name"] = output.name
-                    if hasattr(output, "data"):
-                        output_dict["data"] = dict(output.data)
-                    if hasattr(output, "metadata"):
-                        output_dict["metadata"] = dict(output.metadata)
                     if hasattr(output, "execution_count"):
                         output_dict["execution_count"] = output.execution_count
                     if hasattr(output, "ename"):
@@ -1042,11 +1046,39 @@ def _filter_cell_outputs(cells: list) -> list[dict]:
                         output_dict["evalue"] = output.evalue
                     if hasattr(output, "traceback"):
                         output_dict["traceback"] = output.traceback
+                    
+                    # Handle data field with filtering for large content
+                    if hasattr(output, "data"):
+                        data = dict(output.data)
+                        data_types = list(data.keys())
+                        
+                        # Filter out large binary image data
+                        if any("image" in dt or "png" in dt or "jpeg" in dt or "svg" in dt for dt in data_types):
+                            output_dict["data"] = {
+                                "[filtered]": f"Image data present ({', '.join(data_types)}). Data saved to notebook but not transmitted to reduce token count."
+                            }
+                        # Filter out large HTML
+                        elif any("html" in dt for dt in data_types):
+                            # Keep text/plain if present, filter HTML
+                            filtered_data = {}
+                            for key, value in data.items():
+                                if "html" in key:
+                                    filtered_data["[filtered]"] = f"HTML data present. Data saved to notebook but not transmitted to reduce token count."
+                                else:
+                                    filtered_data[key] = value
+                            output_dict["data"] = filtered_data if filtered_data else {
+                                "[filtered]": f"HTML data present ({', '.join(data_types)})"
+                            }
+                        else:
+                            output_dict["data"] = data
+                    
+                    # Copy metadata if present
+                    if hasattr(output, "metadata"):
+                        output_dict["metadata"] = dict(output.metadata)
 
-                    output_dicts.append(output_dict)
+                    filtered_outputs.append(output_dict)
 
-                # Use _filter_large_outputs to filter the converted dicts
-                filtered_cell["outputs"] = _filter_large_outputs(output_dicts)
+                filtered_cell["outputs"] = filtered_outputs
 
         filtered_cells.append(filtered_cell)
 
@@ -1109,7 +1141,7 @@ async def _execute_and_update_cell(
         "status": exec_results.get("status"),
         "kernel_id": exec_results.get("kernel_id"),
         "execution_count": exec_results.get("execution_count"),
-        "outputs": _filter_large_outputs(exec_results.get("outputs", [])),
+        "outputs": _filter_output_dicts(exec_results.get("outputs", [])),
         "started_new_kernel": exec_results.get("started_new_kernel", False)
     }
     

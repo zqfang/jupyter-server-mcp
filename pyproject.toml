@@ -23,7 +23,7 @@ dependencies = [
     "fastmcp>=2.0.0",
     "nbformat>=5.0",
     "jupyter-collaboration",
-    "jupyter-ai-tools"
+    "jupyter-ai-tools>=0.2.1"
 ]
 
 [project.optional-dependencies]
