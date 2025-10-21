@@ -20,9 +20,50 @@ logger = logging.getLogger(__name__)
 # see extension.py
 _server_context = {"serverapp": None}
 
-# Track active kernels per notebook to support multi-kernel workflows
-# Keyed by notebook_path (absolute path)
-_notebook_kernels: dict[str, str] = {}  # Maps notebook_path -> kernel_id
+
+class _KernelTracker:
+    """Track active kernels per notebook to support multi-kernel workflows."""
+    
+    def __init__(self):
+        """Initialize kernel tracker."""
+        self._kernels: dict[str, str] = {}  # Maps notebook_path -> kernel_id
+    
+    def track(self, notebook_path: str, kernel_id: str) -> None:
+        """Track a kernel for a notebook.
+        
+        Args:
+            notebook_path: Normalized path to notebook
+            kernel_id: Kernel ID to track
+        """
+        if kernel_id:
+            self._kernels[notebook_path] = kernel_id
+            logger.debug(f"Tracking kernel {kernel_id} for {notebook_path}")
+    
+    def get(self, notebook_path: str) -> str | None:
+        """Get the tracked kernel ID for a notebook.
+        
+        Args:
+            notebook_path: Normalized path to notebook
+            
+        Returns:
+            Kernel ID if tracked, None otherwise
+        """
+        return self._kernels.get(notebook_path)
+    
+    def untrack(self, notebook_path: str) -> None:
+        """Stop tracking kernel for a notebook.
+        
+        Args:
+            notebook_path: Normalized path to notebook
+        """
+        if notebook_path in self._kernels:
+            kernel_id = self._kernels[notebook_path]
+            del self._kernels[notebook_path]
+            logger.debug(f"Untracked kernel {kernel_id} for {notebook_path}")
+
+
+# Global kernel tracker instance
+_kernel_tracker = _KernelTracker()
 
 
 # ============================================================================
@@ -32,6 +73,84 @@ _notebook_kernels: dict[str, str] = {}  # Maps notebook_path -> kernel_id
 def _normalize_path(path: str) -> str:
     """Normalize a file path to an absolute path."""
     return os.path.abspath(path)
+
+
+def _require_server_context():
+    """Get server context or raise exception.
+    
+    Call this once per operation instead of checking repeatedly.
+    
+    Returns:
+        The Jupyter ServerApp instance
+        
+    Raises:
+        RuntimeError: If server context is not available
+    """
+    serverapp = get_server_context()
+    if serverapp is None:
+        raise RuntimeError("Server context not available")
+    return serverapp
+
+
+def _validate_cell_index(nb, index: int, operation: str = "access") -> None:
+    """Validate cell index or raise descriptive error.
+    
+    Args:
+        nb: Notebook object
+        index: Cell index to validate
+        operation: Operation being performed (for error message)
+        
+    Raises:
+        IndexError: If index is out of range
+    """
+    if index >= len(nb.cells):
+        raise IndexError(
+            f"Cannot {operation} cell at index {index}: "
+            f"notebook has {len(nb.cells)} cells (valid indices: 0-{len(nb.cells)-1})"
+        )
+
+
+def _validate_code_cell(cell, index: int) -> None:
+    """Validate cell is a code cell.
+    
+    Args:
+        cell: Cell object
+        index: Cell index (for error message)
+        
+    Raises:
+        ValueError: If cell is not a code cell
+    """
+    if cell.cell_type != "code":
+        raise ValueError(
+            f"Cell at index {index} is {cell.cell_type}, not a code cell"
+        )
+
+
+class _NotebookContext:
+    """Context manager for atomic notebook operations.
+    
+    Handles read-modify-write atomically to reduce I/O operations.
+    """
+    
+    def __init__(self, path: str):
+        """Initialize notebook context.
+        
+        Args:
+            path: Path to notebook file
+        """
+        self.path = _normalize_path(path)
+        self.nb = None
+    
+    def __enter__(self):
+        """Read notebook on enter."""
+        self.nb = _read_notebook(self.path)
+        return self.nb
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Write notebook on exit if no exception."""
+        if exc_type is None:
+            _write_notebook(self.path, self.nb)
+        return False
 
 
 def _read_notebook(notebook_path: str):
@@ -44,17 +163,6 @@ def _write_notebook(notebook_path: str, nb) -> None:
     """Write a notebook object to a file."""
     with open(notebook_path, "w", encoding="utf-8") as f:
         nbformat.write(nb, f)
-
-
-def _track_kernel(notebook_path: str, kernel_id: str) -> None:
-    """Track a kernel for a notebook."""
-    if kernel_id:
-        _notebook_kernels[notebook_path] = kernel_id
-
-
-def _get_tracked_kernel(notebook_path: str) -> str | None:
-    """Get the tracked kernel ID for a notebook."""
-    return _notebook_kernels.get(notebook_path)
 
 
 def set_server_context(serverapp):
@@ -227,6 +335,336 @@ async def list_available_kernels() -> dict[str, Any]:
         return {"error": str(e), "kernelspecs": {}}
 
 
+async def shutdown_notebook(
+    notebook_path: str,
+    shutdown_kernel: bool = True
+) -> dict[str, Any]:
+    """Close a notebook session and clean local kernel state.
+
+    This shuts down the kernel associated with a notebook and removes
+    the notebook from the active kernel tracking.
+
+    Args:
+        notebook_path: Path to the notebook file (relative or absolute)
+        shutdown_kernel: If True, shutdown the kernel (default: True)
+
+    Returns:
+        dict: Status information containing:
+            - message: Status message
+            - kernel_id: ID of the kernel that was shut down (if any)
+
+    Example:
+        >>> result = await shutdown_notebook("demo.ipynb")
+        >>> print(result)
+        {
+            "message": "Notebook session closed",
+            "kernel_id": "abc123"
+        }
+    """
+    notebook_path = _normalize_path(notebook_path)
+
+    serverapp = get_server_context()
+    if serverapp is None:
+        return {"message": "Server context not available"}
+
+    # Get kernel ID if tracked
+    kernel_id = _kernel_tracker.get(notebook_path)
+
+    result = {"message": "Notebook session closed"}
+
+    if kernel_id and shutdown_kernel:
+        try:
+            kernel_manager = serverapp.kernel_manager
+            if kernel_id in kernel_manager.list_kernel_ids():
+                await kernel_manager.shutdown_kernel(kernel_id)
+                result["kernel_id"] = kernel_id
+                logger.info(f"Shut down kernel {kernel_id} for notebook {notebook_path}")
+        except Exception as e:
+            logger.warning(f"Error shutting down kernel {kernel_id}: {e}")
+
+    # Remove from tracking
+    _kernel_tracker.untrack(notebook_path)
+
+    return result
+
+
+async def switch_notebook_kernel(
+    notebook_path: str,
+    kernel_name: str
+) -> dict[str, Any]:
+    """Switch a notebook to use a different kernel.
+
+    This updates the notebook's kernelspec metadata and creates a new
+    kernel session with the specified kernel.
+
+    Args:
+        notebook_path: Path to the notebook file (relative or absolute)
+        kernel_name: Name of the kernel to switch to (e.g., "python3", "ir", "julia-1.10")
+
+    Returns:
+        dict: Status information containing:
+            - message: Status message
+            - kernel_name: Name of the new kernel
+            - kernel_id: ID of the new kernel
+
+    Example:
+        >>> # Switch from Python to R
+        >>> result = await switch_notebook_kernel("analysis.ipynb", "ir")
+        >>> print(result)
+        {
+            "message": "Kernel switched to ir",
+            "kernel_name": "ir",
+            "kernel_id": "xyz789"
+        }
+    """
+    notebook_path = _normalize_path(notebook_path)
+
+    # First, shutdown existing kernel
+    await shutdown_notebook(notebook_path, shutdown_kernel=True)
+
+    # Determine language name based on kernel
+    if kernel_name.lower() in ["ir", "r", "irkernel"]:
+        language_name = "R"
+        display_name = "R"
+    elif kernel_name.startswith("python"):
+        language_name = "python"
+        display_name = f"Python 3" if kernel_name == "python3" else kernel_name
+    elif kernel_name.startswith("julia"):
+        language_name = "julia"
+        display_name = kernel_name
+    else:
+        language_name = kernel_name
+        display_name = kernel_name
+
+    # Update notebook metadata atomically
+    with _NotebookContext(notebook_path) as nb:
+        nb.metadata["kernelspec"] = {
+            "name": kernel_name,
+            "display_name": display_name,
+            "language": language_name
+        }
+        nb.metadata["language_info"] = {
+            "name": language_name
+        }
+
+    # Start a new kernel with the specified kernel name
+    serverapp = _require_server_context()
+    kernel_manager = serverapp.kernel_manager
+    kernel_id = await kernel_manager.start_kernel(kernel_name=kernel_name)
+
+    # Track the new kernel
+    _kernel_tracker.track(notebook_path, kernel_id)
+
+    logger.info(f"Switched notebook {notebook_path} to kernel {kernel_name} (ID: {kernel_id})")
+
+    return {
+        "message": f"Kernel switched to {kernel_name}",
+        "kernel_name": kernel_name,
+        "kernel_id": kernel_id
+    }
+
+
+async def _validate_execution_reply(
+    shell_reply: dict,
+    msg_id: str,
+    timeout: int
+) -> int | None:
+    """Validate and extract execution_count from shell channel execute_reply.
+    
+    The execute_reply message ALWAYS contains execution_count, whereas
+    execute_result on iopub only exists when code produces a result.
+    
+    Args:
+        shell_reply: The shell reply message
+        msg_id: Expected parent message ID
+        timeout: Timeout value for logging
+        
+    Returns:
+        execution_count if valid, None otherwise
+    """
+    # Validate this is the reply to our execution request
+    if (shell_reply.get("parent_header", {}).get("msg_id") == msg_id and
+        shell_reply.get("header", {}).get("msg_type") == "execute_reply"):
+        reply_content = shell_reply.get("content", {})
+        execution_count = reply_content.get("execution_count")
+        logger.debug(f"Captured execution_count from shell reply: {execution_count}")
+
+        # Check execution status
+        if reply_content.get("status") == "error":
+            logger.warning("Execute_reply indicates error status")
+        
+        return execution_count
+    else:
+        logger.warning(
+            f"Shell reply validation failed - "
+            f"msg_type={shell_reply.get('header', {}).get('msg_type')}, "
+            f"expected parent_msg_id={msg_id}, "
+            f"got={shell_reply.get('parent_header', {}).get('msg_id')}"
+        )
+        return None
+
+
+async def _collect_outputs(
+    client,
+    msg_id: str,
+    execution_count: int | None,
+    timeout: int
+) -> tuple[list[dict], str, str | None]:
+    """Collect outputs from iopub channel.
+    
+    Args:
+        client: Kernel client
+        msg_id: Message ID to match
+        execution_count: Execution count from shell reply (for validation)
+        timeout: Maximum time to wait for outputs
+        
+    Returns:
+        Tuple of (outputs, status, error_msg)
+    """
+    outputs = []
+    status = "ok"
+    error_msg = None
+
+    # Wait for execution to complete
+    start_time = asyncio.get_event_loop().time()
+    while True:
+        if asyncio.get_event_loop().time() - start_time > timeout:
+            status = "error"
+            error_msg = f"Execution timed out after {timeout} seconds"
+            break
+
+        try:
+            # Directly await the async method - no executor needed for AsyncKernelClient
+            msg = await asyncio.wait_for(
+                client.get_iopub_msg(timeout=0.5),
+                timeout=1
+            )
+
+            # Validate message structure
+            if not isinstance(msg, dict):
+                logger.error(f"Invalid message type from kernel: {type(msg)}")
+                status = "error"
+                error_msg = f"Invalid message type: {type(msg).__name__}"
+                break
+
+            try:
+                msg_type = msg["header"]["msg_type"]
+                content = msg["content"]
+            except (KeyError, TypeError) as e:
+                logger.error(f"Malformed kernel message: {e}")
+                status = "error"
+                error_msg = f"Malformed kernel message: {str(e)}"
+                break
+
+            # Check if this is a reply to our execute request
+            if msg["parent_header"].get("msg_id") != msg_id:
+                continue
+
+            # Handle different message types
+            if msg_type == "execute_result":
+                # execution_count already captured from shell reply
+                # execute_result's execution_count should match for validation
+                result_exec_count = content.get("execution_count")
+                if result_exec_count != execution_count:
+                    logger.warning(
+                        f"execution_count mismatch: shell={execution_count}, "
+                        f"execute_result={result_exec_count}"
+                    )
+
+                outputs.append({
+                    "output_type": "execute_result",
+                    "data": content.get("data", {}),
+                    "metadata": content.get("metadata", {}),
+                    "execution_count": execution_count  # Use from shell reply
+                })
+
+            elif msg_type == "stream":
+                outputs.append({
+                    "output_type": "stream",
+                    "name": content.get("name", "stdout"),
+                    "text": content.get("text", "")
+                })
+
+            elif msg_type == "display_data":
+                outputs.append({
+                    "output_type": "display_data",
+                    "data": content.get("data", {}),
+                    "metadata": content.get("metadata", {})
+                })
+
+            elif msg_type == "error":
+                status = "error"
+                error_msg = "\n".join(content.get("traceback", []))
+                outputs.append({
+                    "output_type": "error",
+                    "ename": content.get("ename", ""),
+                    "evalue": content.get("evalue", ""),
+                    "traceback": content.get("traceback", [])
+                })
+
+            elif msg_type == "status":
+                if content.get("execution_state") == "idle":
+                    # Execution complete
+                    break
+
+        except asyncio.TimeoutError:
+            # No message received in 1 second, check if we should continue
+            continue
+
+    return outputs, status, error_msg
+
+
+async def _execute_code_on_kernel(
+    client,
+    code: str,
+    kernel_id: str,
+    timeout: int
+) -> dict[str, Any]:
+    """Execute code on kernel and collect results.
+    
+    Args:
+        client: Kernel client with started channels
+        code: Code to execute
+        kernel_id: Kernel ID for logging
+        timeout: Execution timeout
+        
+    Returns:
+        dict with execution_count, outputs, status, and optional error
+    """
+    # Execute the code
+    logger.info(f"Executing code in kernel {kernel_id}")
+    msg_id = client.execute(code)
+
+    # Get execution_count from execute_reply on shell channel
+    execution_count = None
+    try:
+        shell_reply = await asyncio.wait_for(
+            client.get_shell_msg(timeout=timeout),
+            timeout=timeout + 1
+        )
+        execution_count = await _validate_execution_reply(shell_reply, msg_id, timeout)
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout waiting for execute_reply on shell channel after {timeout}s")
+    except Exception as e:
+        logger.error(f"Error reading execute_reply from shell channel: {e}")
+
+    # Collect outputs from iopub channel
+    outputs, status, error_msg = await _collect_outputs(client, msg_id, execution_count, timeout)
+
+    logger.info(f"Execution complete: status={status}, outputs={len(outputs)}")
+
+    result = {
+        "execution_count": execution_count,
+        "outputs": outputs,
+        "status": status
+    }
+
+    if error_msg:
+        result["error"] = error_msg
+
+    return result
+
+
 async def execute_cell(
     code: str,
     kernel_id: str | None = None,
@@ -292,149 +730,14 @@ async def execute_cell(
             # Wait for kernel to be ready
             await asyncio.wait_for(client.wait_for_ready(), timeout=10)
 
-            # Execute the code
-            logger.info(f"Executing code in kernel {kernel_id}")
-            msg_id = client.execute(code)
+            # Execute the code and collect results
+            exec_result = await _execute_code_on_kernel(client, code, kernel_id, timeout)
 
-            # ===================================================================
-            # IMPORTANT: Get execution_count from execute_reply on shell channel
-            # The execute_reply message ALWAYS contains execution_count, whereas
-            # execute_result on iopub only exists when code produces a result.
-            # ===================================================================
-            execution_count = None
-            try:
-                shell_reply = await asyncio.wait_for(
-                    client.get_shell_msg(timeout=timeout),
-                    timeout=timeout + 1
-                )
+            # Add kernel info to result
+            exec_result["kernel_id"] = kernel_id
+            exec_result["started_new_kernel"] = started_kernel
 
-                # Validate this is the reply to our execution request
-                if (shell_reply.get("parent_header", {}).get("msg_id") == msg_id and
-                    shell_reply.get("header", {}).get("msg_type") == "execute_reply"):
-                    reply_content = shell_reply.get("content", {})
-                    execution_count = reply_content.get("execution_count")
-                    logger.debug(f"Captured execution_count from shell reply: {execution_count}")
-
-                    # Check execution status
-                    if reply_content.get("status") == "error":
-                        logger.warning("Execute_reply indicates error status")
-                else:
-                    logger.warning(
-                        f"Shell reply validation failed - "
-                        f"msg_type={shell_reply.get('header', {}).get('msg_type')}, "
-                        f"expected parent_msg_id={msg_id}, "
-                        f"got={shell_reply.get('parent_header', {}).get('msg_id')}"
-                    )
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout waiting for execute_reply on shell channel after {timeout}s")
-            except Exception as e:
-                logger.error(f"Error reading execute_reply from shell channel: {e}")
-
-            # Collect outputs from iopub channel
-            outputs = []
-            status = "ok"
-            error_msg = None
-
-            # Wait for execution to complete
-            start_time = asyncio.get_event_loop().time()
-            while True:
-                if asyncio.get_event_loop().time() - start_time > timeout:
-                    status = "error"
-                    error_msg = f"Execution timed out after {timeout} seconds"
-                    break
-
-                try:
-                    # Directly await the async method - no executor needed for AsyncKernelClient
-                    msg = await asyncio.wait_for(
-                        client.get_iopub_msg(timeout=0.5),
-                        timeout=1
-                    )
-
-                    # Validate message structure
-                    if not isinstance(msg, dict):
-                        logger.error(f"Invalid message type from kernel: {type(msg)}")
-                        status = "error"
-                        error_msg = f"Invalid message type: {type(msg).__name__}"
-                        break
-
-                    try:
-                        msg_type = msg["header"]["msg_type"]
-                        content = msg["content"]
-                    except (KeyError, TypeError) as e:
-                        logger.error(f"Malformed kernel message: {e}")
-                        status = "error"
-                        error_msg = f"Malformed kernel message: {str(e)}"
-                        break
-
-                    # Check if this is a reply to our execute request
-                    if msg["parent_header"].get("msg_id") != msg_id:
-                        continue
-
-                    # Handle different message types
-                    if msg_type == "execute_result":
-                        # execution_count already captured from shell reply
-                        # execute_result's execution_count should match for validation
-                        result_exec_count = content.get("execution_count")
-                        if result_exec_count != execution_count:
-                            logger.warning(
-                                f"execution_count mismatch: shell={execution_count}, "
-                                f"execute_result={result_exec_count}"
-                            )
-
-                        outputs.append({
-                            "output_type": "execute_result",
-                            "data": content.get("data", {}),
-                            "metadata": content.get("metadata", {}),
-                            "execution_count": execution_count  # Use from shell reply
-                        })
-
-                    elif msg_type == "stream":
-                        outputs.append({
-                            "output_type": "stream",
-                            "name": content.get("name", "stdout"),
-                            "text": content.get("text", "")
-                        })
-
-                    elif msg_type == "display_data":
-                        outputs.append({
-                            "output_type": "display_data",
-                            "data": content.get("data", {}),
-                            "metadata": content.get("metadata", {})
-                        })
-
-                    elif msg_type == "error":
-                        status = "error"
-                        error_msg = "\n".join(content.get("traceback", []))
-                        outputs.append({
-                            "output_type": "error",
-                            "ename": content.get("ename", ""),
-                            "evalue": content.get("evalue", ""),
-                            "traceback": content.get("traceback", [])
-                        })
-
-                    elif msg_type == "status":
-                        if content.get("execution_state") == "idle":
-                            # Execution complete
-                            break
-
-                except asyncio.TimeoutError:
-                    # No message received in 1 second, check if we should continue
-                    continue
-
-            logger.info(f"Execution complete: status={status}, outputs={len(outputs)}")
-
-            result = {
-                "status": status,
-                "kernel_id": kernel_id,
-                "execution_count": execution_count,
-                "outputs": outputs,
-                "started_new_kernel": started_kernel
-            }
-
-            if error_msg:
-                result["error"] = error_msg
-
-            return result
+            return exec_result
 
         finally:
             # Clean up client
@@ -450,218 +753,6 @@ async def execute_cell(
         }
 
 
-async def shutdown_notebook(
-    notebook_path: str,
-    shutdown_kernel: bool = True
-) -> dict[str, Any]:
-    """Close a notebook session and clean local kernel state.
-
-    This shuts down the kernel associated with a notebook and removes
-    the notebook from the active kernel tracking.
-
-    Args:
-        notebook_path: Path to the notebook file (relative or absolute)
-        shutdown_kernel: If True, shutdown the kernel (default: True)
-
-    Returns:
-        dict: Status information containing:
-            - message: Status message
-            - kernel_id: ID of the kernel that was shut down (if any)
-
-    Example:
-        >>> result = await shutdown_notebook("demo.ipynb")
-        >>> print(result)
-        {
-            "message": "Notebook session closed",
-            "kernel_id": "abc123"
-        }
-    """
-    notebook_path = _normalize_path(notebook_path)
-
-    serverapp = get_server_context()
-    if serverapp is None:
-        return {"message": "Server context not available"}
-
-    # Get kernel ID if tracked
-    kernel_id = _get_tracked_kernel(notebook_path)
-
-    result = {"message": "Notebook session closed"}
-
-    if kernel_id and shutdown_kernel:
-        try:
-            kernel_manager = serverapp.kernel_manager
-            if kernel_id in kernel_manager.list_kernel_ids():
-                await kernel_manager.shutdown_kernel(kernel_id)
-                result["kernel_id"] = kernel_id
-                logger.info(f"Shut down kernel {kernel_id} for notebook {notebook_path}")
-        except Exception as e:
-            logger.warning(f"Error shutting down kernel {kernel_id}: {e}")
-
-    # Remove from tracking
-    if notebook_path in _notebook_kernels:
-        del _notebook_kernels[notebook_path]
-
-    return result
-
-
-async def switch_notebook_kernel(
-    notebook_path: str,
-    kernel_name: str
-) -> dict[str, Any]:
-    """Switch a notebook to use a different kernel.
-
-    This updates the notebook's kernelspec metadata and creates a new
-    kernel session with the specified kernel.
-
-    Args:
-        notebook_path: Path to the notebook file (relative or absolute)
-        kernel_name: Name of the kernel to switch to (e.g., "python3", "ir", "julia-1.10")
-
-    Returns:
-        dict: Status information containing:
-            - message: Status message
-            - kernel_name: Name of the new kernel
-            - kernel_id: ID of the new kernel
-
-    Example:
-        >>> # Switch from Python to R
-        >>> result = await switch_notebook_kernel("analysis.ipynb", "ir")
-        >>> print(result)
-        {
-            "message": "Kernel switched to ir",
-            "kernel_name": "ir",
-            "kernel_id": "xyz789"
-        }
-    """
-    notebook_path = _normalize_path(notebook_path)
-
-    # First, shutdown existing kernel
-    await shutdown_notebook(notebook_path, shutdown_kernel=True)
-
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    # Determine language name based on kernel
-    if kernel_name.lower() in ["ir", "r", "irkernel"]:
-        language_name = "R"
-        display_name = "R"
-    elif kernel_name.startswith("python"):
-        language_name = "python"
-        display_name = f"Python 3" if kernel_name == "python3" else kernel_name
-    elif kernel_name.startswith("julia"):
-        language_name = "julia"
-        display_name = kernel_name
-    else:
-        language_name = kernel_name
-        display_name = kernel_name
-
-    # Update kernelspec metadata
-    nb.metadata["kernelspec"] = {
-        "name": kernel_name,
-        "display_name": display_name,
-        "language": language_name
-    }
-    nb.metadata["language_info"] = {
-        "name": language_name
-    }
-
-    # Save the updated notebook
-    _write_notebook(notebook_path, nb)
-
-    # Start a new kernel with the specified kernel name
-    serverapp = get_server_context()
-    if serverapp is None:
-        raise RuntimeError("Server context not available")
-
-    kernel_manager = serverapp.kernel_manager
-    kernel_id = await kernel_manager.start_kernel(kernel_name=kernel_name)
-
-    # Track the new kernel
-    _track_kernel(notebook_path, kernel_id)
-
-    logger.info(f"Switched notebook {notebook_path} to kernel {kernel_name} (ID: {kernel_id})")
-
-    return {
-        "message": f"Kernel switched to {kernel_name}",
-        "kernel_name": kernel_name,
-        "kernel_id": kernel_id
-    }
-
-async def query_notebook(
-    notebook_path: str,
-    query_type: str,
-    execution_count: int | None = None,
-    position_index: int | None = None,
-    cell_id: str | None = None,
-) -> dict[str, Any] | list | str | int:
-    """Query notebook information and metadata.
-
-    This consolidates all read-only operations into a single tool following MCP best practices.
-
-    Args:
-        notebook_path: Path to the notebook file (relative or absolute)
-        query_type: Type of query to perform. Options:
-            - 'view_source': View source code of notebook (single cell or all cells)
-            - 'check_server': Check if Jupyter server is running and accessible
-            - 'list_sessions': List all notebook sessions on the server
-            - 'list_kernels': List all available kernelspecs on the server
-            - 'get_position_index': Get the index of a code cell
-        execution_count: (For view_source/get_position_index) The execution count to look for.
-            IMPORTANT: This is the number shown in square brackets like [3] in Jupyter UI.
-            Only available for executed code cells. Must be an integer (e.g., 3).
-            COMMON MISTAKE: Don't confuse with position_index!
-            - execution_count=3 finds the cell that was executed 3rd (shows [3] in Jupyter)
-            - position_index=3 finds the 4th cell in the notebook (0-indexed position)
-        position_index: (For view_source) The position index to look for.
-            This is the cell's physical position in the notebook (0-indexed).
-            Examples: first cell = 0, second cell = 1, third cell = 2, etc.
-            Works for all cell types (code, markdown, raw). Must be an integer.
-        cell_id: (For get_position_index) Cell ID like "205658d6-093c-4722-854c-90b149f254ad".
-            This is a unique identifier for each cell, visible in notebook metadata.
-
-    Returns:
-        Union[dict, list, str, int]:
-            - view_source: dict (single cell) or list[dict] (all cells) with cell contents/metadata
-            - check_server: str status message
-            - list_sessions: list of notebook sessions
-            - list_kernels: dict of available kernelspecs
-            - get_position_index: int positional index
-
-    Examples:
-        # View all cells in notebook
-        await query_notebook("my_notebook.ipynb", "view_source")
-
-        # View cell by execution count (the [3] shown in Jupyter UI)
-        await query_notebook("my_notebook.ipynb", "view_source", execution_count=3)
-
-        # View cell by position (first cell=0, second=1, etc)
-        await query_notebook("my_notebook.ipynb", "view_source", position_index=0)
-
-        # Get position index of cell with execution count [5]
-        await query_notebook("my_notebook.ipynb", "get_position_index", execution_count=5)
-
-        # List available kernels
-        await query_notebook("my_notebook.ipynb", "list_kernels")
-
-    Raises:
-        ValueError: If invalid query_type or missing required parameters
-    """
-    if query_type == "view_source":
-        return await _query_view_source(notebook_path, execution_count, position_index)
-    elif query_type == "check_server":
-        return _query_check_server()
-    elif query_type == "list_sessions":
-        return await _query_list_sessions()
-    elif query_type == "list_kernels":
-        return await list_available_kernels()
-    elif query_type == "get_position_index":
-        return await _query_get_position_index(notebook_path, execution_count, cell_id)
-    else:
-        raise ValueError(
-            f"Invalid query_type: {query_type}. Must be one of: view_source, check_server, list_sessions, list_kernels, get_position_index"
-        )
-
-
 async def _query_view_source(
     notebook_path: str,
     execution_count: int | None = None,
@@ -671,9 +762,8 @@ async def _query_view_source(
     if execution_count is not None and position_index is not None:
         raise ValueError("Cannot provide both execution_count and position_index.")
 
-    serverapp = get_server_context()
-    if serverapp is None:
-        raise RuntimeError("Server context not available")
+    # Require server context
+    _require_server_context()
 
     # Normalize path
     notebook_path = _normalize_path(notebook_path)
@@ -710,8 +800,7 @@ async def _query_view_source(
         position_index = position_indices[0]
 
     # Get cell by position index
-    if position_index >= len(nb.cells):
-        raise IndexError(f"Cell index {position_index} out of range (notebook has {len(nb.cells)} cells)")
+    _validate_cell_index(nb, position_index, "view")
 
     return _filter_cell_outputs([nb.cells[position_index]])[0]
 
@@ -726,9 +815,7 @@ def _query_check_server() -> str:
 
 async def _query_list_sessions() -> list:
     """List all notebook sessions on the Jupyter server."""
-    serverapp = get_server_context()
-    if serverapp is None:
-        return []
+    serverapp = _require_server_context()
 
     try:
         session_manager = serverapp.session_manager
@@ -966,59 +1053,70 @@ def _filter_cell_outputs(cells: list) -> list[dict]:
     return filtered_cells
 
 
-async def modify_notebook_cells(
+async def _execute_and_update_cell(
     notebook_path: str,
-    operation: str,
-    cell_content: str | None = None,
-    position_index: int | None = None,
-    execute: bool = True,
+    cell_index: int,
+    code: str,
+    kernel_id: str | None = None,
+    timeout: int = 30
 ) -> dict[str, Any]:
-    """Modify notebook cells (add, edit, delete).
-
-    This consolidates all cell modification operations into a single tool following MCP best practices.
-    Default to execute=True unless the user requests otherwise or you have good reason not to
-    execute immediately.
-
+    """Execute code and update cell with results in one atomic operation.
+    
+    This consolidates the common pattern of:
+    1. Execute code in kernel
+    2. Track new kernel if started
+    3. Update notebook cell with results
+    4. Filter outputs for response
+    
     Args:
-        notebook_path: Path to the notebook file (relative or absolute)
-        operation: Type of cell operation. Options:
-            - 'add_code': Add (and optionally execute) a code cell at end or specific position
-            - 'edit_code': Edit a code cell at specific position
-            - 'add_markdown': Add a markdown cell at end or specific position
-            - 'edit_markdown': Edit an existing markdown cell at specific position
-            - 'delete': Delete a cell at specific position
-        cell_content: Content for the cell (required for add_code, edit_code, add_markdown, edit_markdown)
-        position_index: Position index (0-indexed cell location) for operations. Must be an integer.
-            - Optional for add_code/add_markdown: if provided, inserts at that position; if not, adds at end
-            - Required for edit_code/edit_markdown/delete: specifies which cell to modify
-            Examples: position_index=0 (first cell), position_index=2 (third cell)
-        execute: Whether to execute code cells after adding/editing (default: True)
-
+        notebook_path: Normalized path to notebook
+        cell_index: Index of cell to update
+        code: Code to execute
+        kernel_id: Optional kernel ID to use
+        timeout: Execution timeout
+        
     Returns:
-        dict: Operation results containing:
-            - For add_code/edit_code with execute=True: execution_count, outputs, status
-            - For add_code/edit_code with execute=False: message field
-            - For add_markdown/edit_markdown: message and error fields
-            - For delete: message and error fields
-
-    Raises:
-        ValueError: If invalid operation or missing required parameters
-        IndexError: If position_index is out of range
+        dict: Execution results with filtered outputs
     """
-    if operation == "add_code":
-        return await _modify_add_code_cell(notebook_path, cell_content, execute, position_index)
-    elif operation == "edit_code":
-        return await _modify_edit_code_cell(notebook_path, position_index, cell_content, execute)
-    elif operation == "add_markdown":
-        return await _modify_add_markdown_cell(notebook_path, cell_content, position_index)
-    elif operation == "edit_markdown":
-        return await _modify_edit_markdown_cell(notebook_path, position_index, cell_content)
-    elif operation == "delete":
-        return await _modify_delete_cell(notebook_path, position_index)
-    else:
-        raise ValueError(
-            f"Invalid operation: {operation}. Must be one of: add_code, edit_code, add_markdown, edit_markdown, delete"
-        )
+    # Execute code
+    exec_results = await execute_cell(code, kernel_id=kernel_id, timeout=timeout)
+    
+    # Ensure exec_results is a dict
+    if not isinstance(exec_results, dict):
+        logger.error(f"exec_results is not a dict: {type(exec_results)}")
+        if inspect.iscoroutine(exec_results):
+            logger.error("exec_results is a coroutine - execute_cell was not properly awaited")
+        raise TypeError(f"execute_cell returned {type(exec_results)} instead of dict")
+    
+    # Track kernel if new
+    if exec_results.get("started_new_kernel"):
+        _kernel_tracker.track(notebook_path, exec_results["kernel_id"])
+    
+    # Update notebook cell atomically
+    with _NotebookContext(notebook_path) as nb:
+        if cell_index < len(nb.cells):
+            cell = nb.cells[cell_index]
+            if exec_results.get("execution_count") is not None:
+                cell.execution_count = exec_results["execution_count"]
+            # Save UNFILTERED outputs to notebook file
+            if exec_results.get("outputs"):
+                cell.outputs = _convert_outputs_to_notebook_nodes(exec_results["outputs"])
+        else:
+            logger.warning(f"Cell index {cell_index} out of range after reading notebook")
+    
+    # Return results with filtered outputs for MCP response
+    filtered_results = {
+        "status": exec_results.get("status"),
+        "kernel_id": exec_results.get("kernel_id"),
+        "execution_count": exec_results.get("execution_count"),
+        "outputs": _filter_large_outputs(exec_results.get("outputs", [])),
+        "started_new_kernel": exec_results.get("started_new_kernel", False)
+    }
+    
+    if "error" in exec_results:
+        filtered_results["error"] = exec_results["error"]
+    
+    return filtered_results
 
 
 async def _modify_add_code_cell(
@@ -1046,24 +1144,19 @@ async def _modify_add_code_cell(
     logger.info("Adding code cell")
     notebook_path = _normalize_path(notebook_path)
 
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    # Create new code cell
-    new_cell = new_code_cell(source=cell_content)
-
-    # Insert at position or append
-    if position_index is not None:
-        if position_index > len(nb.cells):
-            position_index = len(nb.cells)
-        nb.cells.insert(position_index, new_cell)
-        inserted_index = position_index
-    else:
-        nb.cells.append(new_cell)
-        inserted_index = len(nb.cells) - 1
-
-    # Save the notebook
-    _write_notebook(notebook_path, nb)
+    # Add cell to notebook atomically
+    with _NotebookContext(notebook_path) as nb:
+        new_cell = new_code_cell(source=cell_content)
+        
+        # Insert at position or append
+        if position_index is not None:
+            if position_index > len(nb.cells):
+                position_index = len(nb.cells)
+            nb.cells.insert(position_index, new_cell)
+            inserted_index = position_index
+        else:
+            nb.cells.append(new_cell)
+            inserted_index = len(nb.cells) - 1
 
     results = {"message": f"Code cell added at position {inserted_index}"}
 
@@ -1071,56 +1164,19 @@ async def _modify_add_code_cell(
     if execute:
         try:
             logger.info("Cell added successfully, now executing")
-            # Use tracked kernel if available, otherwise create new one
-            kernel_id = _get_tracked_kernel(notebook_path)
-
-            # Execute the cell and await the result
-            exec_results = await execute_cell(cell_content, kernel_id=kernel_id)
-
-            # Ensure exec_results is a dict and not a coroutine
-            if not isinstance(exec_results, dict):
-                logger.error(f"exec_results is not a dict: {type(exec_results)}")
-                # Check if it's a coroutine that needs to be awaited
-                if inspect.iscoroutine(exec_results):
-                    logger.error("exec_results is a coroutine - this indicates execute_cell was not properly awaited")
-                raise TypeError(f"execute_cell returned {type(exec_results)} instead of dict")
-
-            # Extract and update results - using direct dict access to avoid subscript errors
-            logger.debug(f"exec_results type: {type(exec_results)}, keys: {list(exec_results.keys())}")
-
-            results["status"] = exec_results.get("status")
-            results["kernel_id"] = exec_results.get("kernel_id")
-            results["execution_count"] = exec_results.get("execution_count")
-            # Filter large outputs to reduce MCP response token count
-            results["outputs"] = _filter_large_outputs(exec_results.get("outputs", []))
-            results["started_new_kernel"] = exec_results.get("started_new_kernel", False)
-            if "error" in exec_results:
-                results["error"] = exec_results.get("error")
-
-            # Track the kernel if it was newly created
-            if exec_results.get("started_new_kernel"):
-                _track_kernel(notebook_path, exec_results.get("kernel_id"))
-
-            # Update the notebook with execution results
-            nb = _read_notebook(notebook_path)
-
-            # Ensure we have the cell at the inserted index
-            if inserted_index < len(nb.cells):
-                cell = nb.cells[inserted_index]
-                exec_count = results.get("execution_count")
-                if exec_count is not None:
-                    cell.execution_count = exec_count
-                # IMPORTANT: Save UNFILTERED outputs to notebook (from exec_results, not results)
-                # so that plots and images are preserved in the .ipynb file
-                unfiltered_outputs = exec_results.get("outputs", [])
-                if unfiltered_outputs:
-                    # Convert dict outputs to NotebookNode objects
-                    cell.outputs = _convert_outputs_to_notebook_nodes(unfiltered_outputs)
-            else:
-                logger.warning(f"Cell index {inserted_index} out of range after reading notebook")
-
-            _write_notebook(notebook_path, nb)
-
+            kernel_id = _kernel_tracker.get(notebook_path)
+            
+            # Use the new consolidated execution helper
+            exec_results = await _execute_and_update_cell(
+                notebook_path, 
+                inserted_index, 
+                cell_content, 
+                kernel_id
+            )
+            
+            # Merge execution results into response
+            results.update(exec_results)
+            
         except Exception as e:
             import traceback
             logger.error(f"Error during execution: {e}")
@@ -1162,69 +1218,33 @@ async def _modify_edit_code_cell(
     logger.info("Editing code cell")
     notebook_path = _normalize_path(notebook_path)
 
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    # Check bounds
-    if position_index >= len(nb.cells):
-        raise IndexError(f"Cell index {position_index} out of range (notebook has {len(nb.cells)} cells)")
-
-    # Update cell source
-    nb.cells[position_index].source = cell_content
-    nb.cells[position_index].execution_count = None
-    nb.cells[position_index].outputs = []
-
-    # Save the notebook
-    _write_notebook(notebook_path, nb)
+    # Edit cell atomically
+    with _NotebookContext(notebook_path) as nb:
+        _validate_cell_index(nb, position_index, "edit")
+        
+        # Update cell source and clear previous execution
+        nb.cells[position_index].source = cell_content
+        nb.cells[position_index].execution_count = None
+        nb.cells[position_index].outputs = []
 
     results = {"message": f"Code cell at position {position_index} edited"}
 
     # Execute if requested
     if execute:
         try:
-            # Use tracked kernel if available
-            kernel_id = _get_tracked_kernel(notebook_path)
-
-            # Execute the cell and await the result
-            exec_results = await execute_cell(cell_content, kernel_id=kernel_id)
-
-            # Ensure exec_results is a dict
-            if not isinstance(exec_results, dict):
-                logger.error(f"exec_results is not a dict: {type(exec_results)}")
-                raise TypeError(f"execute_cell returned {type(exec_results)} instead of dict")
-
-            # Extract and update results directly
-            results["status"] = exec_results.get("status")
-            results["kernel_id"] = exec_results.get("kernel_id")
-            results["execution_count"] = exec_results.get("execution_count")
-            # Filter large outputs to reduce MCP response token count
-            results["outputs"] = _filter_large_outputs(exec_results.get("outputs", []))
-            results["started_new_kernel"] = exec_results.get("started_new_kernel", False)
-            if "error" in exec_results:
-                results["error"] = exec_results.get("error")
-
-            # Track the kernel if it was newly created
-            if exec_results.get("started_new_kernel"):
-                _track_kernel(notebook_path, exec_results.get("kernel_id"))
-
-            # Update the notebook with execution results
-            nb = _read_notebook(notebook_path)
-
-            if position_index < len(nb.cells):
-                cell = nb.cells[position_index]
-                exec_count = results.get("execution_count")
-                if exec_count is not None:
-                    cell.execution_count = exec_count
-                # IMPORTANT: Save UNFILTERED outputs to notebook (from exec_results, not results)
-                # so that plots and images are preserved in the .ipynb file
-                unfiltered_outputs = exec_results.get("outputs", [])
-                if unfiltered_outputs:
-                    # Convert dict outputs to NotebookNode objects
-                    cell.outputs = _convert_outputs_to_notebook_nodes(unfiltered_outputs)
-            else:
-                logger.warning(f"Cell index {position_index} out of range after reading notebook")
-
-            _write_notebook(notebook_path, nb)
+            kernel_id = _kernel_tracker.get(notebook_path)
+            
+            # Use the new consolidated execution helper
+            exec_results = await _execute_and_update_cell(
+                notebook_path,
+                position_index,
+                cell_content,
+                kernel_id
+            )
+            
+            # Merge execution results into response
+            results.update(exec_results)
+            
         except Exception as e:
             logger.error(f"Error during code cell edit execution: {e}")
             results["error"] = str(e)
@@ -1249,35 +1269,28 @@ async def _modify_add_markdown_cell(
         raise ValueError("cell_content is required for add_markdown operation")
 
     logger.info("Adding markdown cell")
-
     notebook_path = _normalize_path(notebook_path)
 
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    # Create new markdown cell
-    new_cell = new_markdown_cell(source=cell_content)
-
-    results = {"message": "", "error": ""}
     try:
-        # Insert at position or append
-        if position_index is not None:
-            if position_index > len(nb.cells):
-                position_index = len(nb.cells)
-            nb.cells.insert(position_index, new_cell)
-            results["message"] = f"Markdown cell inserted at position {position_index}"
-        else:
-            nb.cells.append(new_cell)
-            results["message"] = "Markdown cell added"
-
-        # Save the notebook
-        _write_notebook(notebook_path, nb)
-
+        # Add markdown cell atomically
+        with _NotebookContext(notebook_path) as nb:
+            new_cell = new_markdown_cell(source=cell_content)
+            
+            # Insert at position or append
+            if position_index is not None:
+                if position_index > len(nb.cells):
+                    position_index = len(nb.cells)
+                nb.cells.insert(position_index, new_cell)
+                message = f"Markdown cell inserted at position {position_index}"
+            else:
+                nb.cells.append(new_cell)
+                message = "Markdown cell added"
+        
+        return {"message": message, "error": ""}
+        
     except Exception as e:
         logger.error(f"Error adding markdown cell: {e}")
-        results["error"] = str(e)
-
-    return results
+        return {"message": "", "error": str(e)}
 
 
 async def _modify_edit_markdown_cell(
@@ -1319,31 +1332,19 @@ async def _modify_edit_markdown_cell(
         raise ValueError("position_index is required for edit_markdown operation")
 
     logger.info("Editing markdown cell")
-
     notebook_path = _normalize_path(notebook_path)
 
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    results = {"message": "", "error": ""}
-
     try:
-        # Check bounds
-        if position_index >= len(nb.cells):
-            raise IndexError(f"Cell index {position_index} out of range (notebook has {len(nb.cells)} cells)")
-
-        # Update cell source
-        nb.cells[position_index].source = cell_content
-
-        # Save the notebook
-        _write_notebook(notebook_path, nb)
-
-        results["message"] = "Markdown cell edited"
+        # Edit markdown cell atomically
+        with _NotebookContext(notebook_path) as nb:
+            _validate_cell_index(nb, position_index, "edit")
+            nb.cells[position_index].source = cell_content
+        
+        return {"message": "Markdown cell edited", "error": ""}
+        
     except Exception as e:
         logger.error(f"Error editing markdown cell: {e}")
-        results["error"] = str(e)
-
-    return results
+        return {"message": "", "error": str(e)}
 
 
 async def _modify_delete_cell(notebook_path: str, position_index: int) -> dict:
@@ -1365,26 +1366,201 @@ async def _modify_delete_cell(notebook_path: str, position_index: int) -> dict:
 
     notebook_path = _normalize_path(notebook_path)
 
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    results = {"message": "", "error": ""}
     try:
-        # Check bounds
-        if position_index >= len(nb.cells):
-            raise IndexError(f"Cell index {position_index} out of range (notebook has {len(nb.cells)} cells)")
-
-        # Delete cell
-        del nb.cells[position_index]
-
-        # Save the notebook
-        _write_notebook(notebook_path, nb)
-
-        results["message"] = "Cell deleted"
+        # Delete cell atomically
+        with _NotebookContext(notebook_path) as nb:
+            _validate_cell_index(nb, position_index, "delete")
+            del nb.cells[position_index]
+        
+        return {"message": "Cell deleted", "error": ""}
+        
     except Exception as e:
-        results["error"] = str(e)
+        return {"message": "", "error": str(e)}
 
-    return results
+async def _execute_cell_by_position(notebook_path: str, position_index: int, timeout: int = 30) -> dict:
+    """Execute an existing code cell in a Jupyter notebook by position.
+
+    In most cases you should call modify_notebook_cells instead, but occasionally
+    you might want to re-execute a cell after changing a *different* cell.
+
+    Note that users can edit cell contents too, so if you assume you know the position_index
+    of the cell to execute based on past chat history, you should first make sure the notebook state
+    matches your expected state using your query_notebook tool. If it does not match the
+    expected state, you should then use your query_notebook tool to update your knowledge of the
+    current cell contents.
+
+    Technically could be considered state_dependent, but it is usually called inside edit_code_cell
+    or add_code_cell which area already state_dependent. Every hash update is slow because we have
+    to wait for the notebook to save first so using refreshes_state instead saves 1.5s per call.
+    Only risk is if user asks goose to execute a single cell and goose assumes it knows the
+    position_index already, but usually it would be faster for the user to just execute the cell
+    directly - this tool is mostly useful to allow goose to debug independently.
+
+    """
+    if position_index is None:
+        raise ValueError("position_index is required for execute_cell operation")
+
+    notebook_path = _normalize_path(notebook_path)
+
+    # Read the cell to execute
+    nb = _read_notebook(notebook_path)
+    _validate_cell_index(nb, position_index, "execute")
+    
+    cell = nb.cells[position_index]
+    _validate_code_cell(cell, position_index)
+
+    # Use tracked kernel if available
+    kernel_id = _kernel_tracker.get(notebook_path)
+
+    try:
+        # Use the new consolidated execution helper
+        result = await _execute_and_update_cell(
+            notebook_path,
+            position_index,
+            cell.source,
+            kernel_id,
+            timeout
+        )
+        
+        return result
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Error executing cell by position: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {
+            "error": str(e),
+            "status": "error",
+            "kernel_id": kernel_id,
+            "started_new_kernel": False
+        }
+
+async def _execute_install_packages(notebook_path: str, package_names: str) -> str:
+    """Install one or more packages using pip in the notebook environment.
+
+    Unlike add_code_cell, this shouldn't rely on other code written in the notebook, so we mark
+    it as refreshes_state rather than state_dependent. Assumes 'uv' is available in the
+    environment where the Jupyter kernel is running.
+    """
+    if not package_names:
+        raise ValueError("package_names is required for install_packages operation")
+
+    logger.info(f"Installing packages: {package_names}")
+    notebook_path = _normalize_path(notebook_path)
+
+    try:
+        # Create installation command
+        cell_content = f"!pip install {package_names}"
+
+        # Use tracked kernel if available
+        kernel_id = _kernel_tracker.get(notebook_path)
+
+        # Execute the cell and await the result
+        result = await execute_cell(cell_content, kernel_id=kernel_id)
+
+        # Ensure result is a dict
+        if not isinstance(result, dict):
+            logger.error(f"result is not a dict: {type(result)}, value: {result}")
+            return f"Error: execute_cell returned {type(result).__name__} instead of dict"
+
+        # Track the kernel if it was newly created
+        if result.get("started_new_kernel"):
+            _kernel_tracker.track(notebook_path, result.get("kernel_id"))
+
+        # Extract output to see if installation was successful
+        outputs = result.get("outputs", [])
+        if len(outputs) == 0:
+            installation_result = "No output from installation command"
+        else:
+            # Combine text from all outputs
+            installation_result = []
+            for output in outputs:
+                if output.get("output_type") == "stream":
+                    installation_result.append(output.get("text", ""))
+                elif output.get("output_type") == "error":
+                    installation_result.append("\n".join(output.get("traceback", [])))
+
+        return f"Installation of packages [{package_names}]: {installation_result}"
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Error installing packages: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return f"Error: {str(e)}"
+
+async def query_notebook(
+    notebook_path: str,
+    query_type: str,
+    execution_count: int | None = None,
+    position_index: int | None = None,
+    cell_id: str | None = None,
+) -> dict[str, Any] | list | str | int:
+    """Query notebook information and metadata.
+
+    This consolidates all read-only operations into a single tool following MCP best practices.
+
+    Args:
+        notebook_path: Path to the notebook file (relative or absolute)
+        query_type: Type of query to perform. Options:
+            - 'view_source': View source code of notebook (single cell or all cells)
+            - 'check_server': Check if Jupyter server is running and accessible
+            - 'list_sessions': List all notebook sessions on the server
+            - 'list_kernels': List all available kernelspecs on the server
+            - 'get_position_index': Get the index of a code cell
+        execution_count: (For view_source/get_position_index) The execution count to look for.
+            IMPORTANT: This is the number shown in square brackets like [3] in Jupyter UI.
+            Only available for executed code cells. Must be an integer (e.g., 3).
+            COMMON MISTAKE: Don't confuse with position_index!
+            - execution_count=3 finds the cell that was executed 3rd (shows [3] in Jupyter)
+            - position_index=3 finds the 4th cell in the notebook (0-indexed position)
+        position_index: (For view_source) The position index to look for.
+            This is the cell's physical position in the notebook (0-indexed).
+            Examples: first cell = 0, second cell = 1, third cell = 2, etc.
+            Works for all cell types (code, markdown, raw). Must be an integer.
+        cell_id: (For get_position_index) Cell ID like "205658d6-093c-4722-854c-90b149f254ad".
+            This is a unique identifier for each cell, visible in notebook metadata.
+
+    Returns:
+        Union[dict, list, str, int]:
+            - view_source: dict (single cell) or list[dict] (all cells) with cell contents/metadata
+            - check_server: str status message
+            - list_sessions: list of notebook sessions
+            - list_kernels: dict of available kernelspecs
+            - get_position_index: int positional index
+
+    Examples:
+        # View all cells in notebook
+        await query_notebook("my_notebook.ipynb", "view_source")
+
+        # View cell by execution count (the [3] shown in Jupyter UI)
+        await query_notebook("my_notebook.ipynb", "view_source", execution_count=3)
+
+        # View cell by position (first cell=0, second=1, etc)
+        await query_notebook("my_notebook.ipynb", "view_source", position_index=0)
+
+        # Get position index of cell with execution count [5]
+        await query_notebook("my_notebook.ipynb", "get_position_index", execution_count=5)
+
+        # List available kernels
+        await query_notebook("my_notebook.ipynb", "list_kernels")
+
+    Raises:
+        ValueError: If invalid query_type or missing required parameters
+    """
+    if query_type == "view_source":
+        return await _query_view_source(notebook_path, execution_count, position_index)
+    elif query_type == "check_server":
+        return _query_check_server()
+    elif query_type == "list_sessions":
+        return await _query_list_sessions()
+    elif query_type == "list_kernels":
+        return await list_available_kernels()
+    elif query_type == "get_position_index":
+        return await _query_get_position_index(notebook_path, execution_count, cell_id)
+    else:
+        raise ValueError(
+            f"Invalid query_type: {query_type}. Must be one of: view_source, check_server, list_sessions, list_kernels, get_position_index"
+        )
 
 
 async def execute_notebook_code(
@@ -1438,145 +1614,59 @@ async def execute_notebook_code(
         )
 
 
-async def _execute_cell_by_position(notebook_path: str, position_index: int, timeout: int = 30) -> dict:
-    """Execute an existing code cell in a Jupyter notebook by position.
+async def modify_notebook_cells(
+    notebook_path: str,
+    operation: str,
+    cell_content: str | None = None,
+    position_index: int | None = None,
+    execute: bool = True,
+) -> dict[str, Any]:
+    """Modify notebook cells (add, edit, delete).
 
-    In most cases you should call modify_notebook_cells instead, but occasionally
-    you might want to re-execute a cell after changing a *different* cell.
+    This consolidates all cell modification operations into a single tool following MCP best practices.
+    Default to execute=True unless the user requests otherwise or you have good reason not to
+    execute immediately.
 
-    Note that users can edit cell contents too, so if you assume you know the position_index
-    of the cell to execute based on past chat history, you should first make sure the notebook state
-    matches your expected state using your query_notebook tool. If it does not match the
-    expected state, you should then use your query_notebook tool to update your knowledge of the
-    current cell contents.
+    Args:
+        notebook_path: Path to the notebook file (relative or absolute)
+        operation: Type of cell operation. Options:
+            - 'add_code': Add (and optionally execute) a code cell at end or specific position
+            - 'edit_code': Edit a code cell at specific position
+            - 'add_markdown': Add a markdown cell at end or specific position
+            - 'edit_markdown': Edit an existing markdown cell at specific position
+            - 'delete': Delete a cell at specific position
+        cell_content: Content for the cell (required for add_code, edit_code, add_markdown, edit_markdown)
+        position_index: Position index (0-indexed cell location) for operations. Must be an integer.
+            - Optional for add_code/add_markdown: if provided, inserts at that position; if not, adds at end
+            - Required for edit_code/edit_markdown/delete: specifies which cell to modify
+            Examples: position_index=0 (first cell), position_index=2 (third cell)
+        execute: Whether to execute code cells after adding/editing (default: True)
 
-    Technically could be considered state_dependent, but it is usually called inside edit_code_cell
-    or add_code_cell which area already state_dependent. Every hash update is slow because we have
-    to wait for the notebook to save first so using refreshes_state instead saves 1.5s per call.
-    Only risk is if user asks goose to execute a single cell and goose assumes it knows the
-    position_index already, but usually it would be faster for the user to just execute the cell
-    directly - this tool is mostly useful to allow goose to debug independently.
+    Returns:
+        dict: Operation results containing:
+            - For add_code/edit_code with execute=True: execution_count, outputs, status
+            - For add_code/edit_code with execute=False: message field
+            - For add_markdown/edit_markdown: message and error fields
+            - For delete: message and error fields
 
+    Raises:
+        ValueError: If invalid operation or missing required parameters
+        IndexError: If position_index is out of range
     """
-    if position_index is None:
-        raise ValueError("position_index is required for execute_cell operation")
-
-    notebook_path = _normalize_path(notebook_path)
-
-    # Read the notebook
-    nb = _read_notebook(notebook_path)
-
-    # Check bounds
-    if position_index >= len(nb.cells):
-        raise IndexError(f"Cell index {position_index} out of range (notebook has {len(nb.cells)} cells)")
-
-    cell = nb.cells[position_index]
-    if cell.cell_type != "code":
-        raise ValueError(f"Cell at position {position_index} is not a code cell")
-
-    # Use tracked kernel if available
-    kernel_id = _get_tracked_kernel(notebook_path)
-
-    try:
-        # Execute the cell and await the result
-        result = await execute_cell(cell.source, kernel_id=kernel_id, timeout=timeout)
-
-        # Ensure result is a dict
-        if not isinstance(result, dict):
-            logger.error(f"result is not a dict: {type(result)}, value: {result}")
-            return {
-                "error": f"execute_cell returned {type(result).__name__} instead of dict",
-                "status": "error",
-                "kernel_id": kernel_id,
-                "started_new_kernel": False
-            }
-
-        # Track the kernel if it was newly created
-        if result.get("started_new_kernel"):
-            _track_kernel(notebook_path, result.get("kernel_id"))
-
-        # Update the notebook with execution results
-        if position_index < len(nb.cells):
-            cell = nb.cells[position_index]
-            if result.get("execution_count") is not None:
-                cell.execution_count = result["execution_count"]
-            if result.get("outputs"):
-                # Convert dict outputs to NotebookNode objects
-                cell.outputs = _convert_outputs_to_notebook_nodes(result["outputs"])
-        else:
-            logger.warning(f"Cell index {position_index} out of range after reading notebook")
-
-        # Save the notebook
-        _write_notebook(notebook_path, nb)
-
-        # Filter outputs in the returned result to reduce MCP response token count
-        result["outputs"] = _filter_large_outputs(result.get("outputs", []))
-        return result
-
-    except Exception as e:
-        import traceback
-        logger.error(f"Error executing cell by position: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return {
-            "error": str(e),
-            "status": "error",
-            "kernel_id": kernel_id,
-            "started_new_kernel": False
-        }
-
-
-async def _execute_install_packages(notebook_path: str, package_names: str) -> str:
-    """Install one or more packages using pip in the notebook environment.
-
-    Unlike add_code_cell, this shouldn't rely on other code written in the notebook, so we mark
-    it as refreshes_state rather than state_dependent. Assumes 'uv' is available in the
-    environment where the Jupyter kernel is running.
-    """
-    if not package_names:
-        raise ValueError("package_names is required for install_packages operation")
-
-    logger.info(f"Installing packages: {package_names}")
-    notebook_path = _normalize_path(notebook_path)
-
-    try:
-        # Create installation command
-        cell_content = f"!pip install {package_names}"
-
-        # Use tracked kernel if available
-        kernel_id = _get_tracked_kernel(notebook_path)
-
-        # Execute the cell and await the result
-        result = await execute_cell(cell_content, kernel_id=kernel_id)
-
-        # Ensure result is a dict
-        if not isinstance(result, dict):
-            logger.error(f"result is not a dict: {type(result)}, value: {result}")
-            return f"Error: execute_cell returned {type(result).__name__} instead of dict"
-
-        # Track the kernel if it was newly created
-        if result.get("started_new_kernel"):
-            _track_kernel(notebook_path, result.get("kernel_id"))
-
-        # Extract output to see if installation was successful
-        outputs = result.get("outputs", [])
-        if len(outputs) == 0:
-            installation_result = "No output from installation command"
-        else:
-            # Combine text from all outputs
-            installation_result = []
-            for output in outputs:
-                if output.get("output_type") == "stream":
-                    installation_result.append(output.get("text", ""))
-                elif output.get("output_type") == "error":
-                    installation_result.append("\n".join(output.get("traceback", [])))
-
-        return f"Installation of packages [{package_names}]: {installation_result}"
-
-    except Exception as e:
-        import traceback
-        logger.error(f"Error installing packages: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return f"Error: {str(e)}"
+    if operation == "add_code":
+        return await _modify_add_code_cell(notebook_path, cell_content, execute, position_index)
+    elif operation == "edit_code":
+        return await _modify_edit_code_cell(notebook_path, position_index, cell_content, execute)
+    elif operation == "add_markdown":
+        return await _modify_add_markdown_cell(notebook_path, cell_content, position_index)
+    elif operation == "edit_markdown":
+        return await _modify_edit_markdown_cell(notebook_path, position_index, cell_content)
+    elif operation == "delete":
+        return await _modify_delete_cell(notebook_path, position_index)
+    else:
+        raise ValueError(
+            f"Invalid operation: {operation}. Must be one of: add_code, edit_code, add_markdown, edit_markdown, delete"
+        )
 
 
 async def setup_notebook(
@@ -1699,7 +1789,7 @@ async def setup_notebook(
         try:
             kernel_manager = serverapp.kernel_manager
             kernel_id = await kernel_manager.start_kernel(kernel_name=kernel_name)
-            _track_kernel(notebook_path, kernel_id)
+            _kernel_tracker.track(notebook_path, kernel_id)
             logger.info(f"Started kernel {kernel_name} (ID: {kernel_id}) for notebook {notebook_path}")
         except Exception as e:
             logger.warning(f"Could not start kernel: {e}")

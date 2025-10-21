@@ -15,13 +15,10 @@ from jupyter_server_mcp.notebook_execution_tools import (
     _convert_outputs_to_notebook_nodes,
     _filter_cell_outputs,
     _get_available_execution_counts,
-    _get_tracked_kernel,
     _normalize_path,
     _read_notebook,
-    _track_kernel,
     _write_notebook,
     execute_cell,
-    execute_notebook,
     get_server_context,
     list_available_kernels,
     list_running_kernels,
@@ -29,9 +26,9 @@ from jupyter_server_mcp.notebook_execution_tools import (
     query_notebook,
     set_server_context,
     setup_notebook,
-    shutdown_kernel,
     shutdown_notebook,
     switch_notebook_kernel,
+    _kernel_tracker
 )
 
 
@@ -221,12 +218,12 @@ class TestHelperFunctions:
         path = "/test/path.ipynb"
         kernel_id = "kernel-123"
 
-        _track_kernel(path, kernel_id)
-        assert _get_tracked_kernel(path) == kernel_id
+        _kernel_tracker.track(path, kernel_id)
+        assert _kernel_tracker.get(path) == kernel_id
 
     def test_get_tracked_kernel_none(self):
         """Test getting non-existent kernel."""
-        result = _get_tracked_kernel("/nonexistent/path.ipynb")
+        result = _kernel_tracker.get("/nonexistent/path.ipynb")
         assert result is None
 
     def test_convert_outputs_to_notebook_nodes(self):
@@ -398,57 +395,6 @@ class TestExecuteCell:
         assert result["execution_count"] >= 1
 
 
-class TestExecuteNotebook:
-    """Test execute_notebook function."""
-
-    @pytest.mark.asyncio
-    async def test_execute_notebook_not_found(self):
-        """Test executing non-existent notebook."""
-        result = await execute_notebook("/nonexistent/notebook.ipynb")
-        assert result["status"] == "error"
-        assert "not found" in result["error"].lower()
-
-    @pytest.mark.asyncio
-    async def test_execute_notebook_empty(self, temp_notebook, mock_serverapp):
-        """Test executing empty notebook."""
-        set_server_context(mock_serverapp)
-
-        result = await execute_notebook(temp_notebook)
-        assert result["status"] == "completed"
-        assert result["cells_executed"] == 0
-        assert result["cells_total"] == 0
-        assert "message" in result
-        assert "No code cells" in result["message"]
-
-
-class TestShutdownKernel:
-    """Test shutdown_kernel function."""
-
-    @pytest.mark.asyncio
-    async def test_shutdown_kernel_no_context(self):
-        """Test shutdown without server context."""
-        result = await shutdown_kernel("kernel-123")
-        assert result["status"] == "error"
-
-    @pytest.mark.asyncio
-    async def test_shutdown_kernel_not_found(self, mock_serverapp):
-        """Test shutting down non-existent kernel."""
-        set_server_context(mock_serverapp)
-        result = await shutdown_kernel("nonexistent-kernel")
-        assert result["status"] == "error"
-        assert "not found" in result["error"].lower()
-
-    @pytest.mark.asyncio
-    async def test_shutdown_kernel_success(self, mock_serverapp):
-        """Test successful kernel shutdown."""
-        set_server_context(mock_serverapp)
-        kernel_id = await mock_serverapp.kernel_manager.start_kernel()
-
-        result = await shutdown_kernel(kernel_id)
-        assert result["status"] == "shutdown"
-        assert result["kernel_id"] == kernel_id
-
-
 class TestSetupNotebook:
     """Test setup_notebook function."""
 
@@ -502,7 +448,7 @@ class TestShutdownNotebook:
         """Test shutdown notebook with tracked kernel."""
         set_server_context(mock_serverapp)
         kernel_id = await mock_serverapp.kernel_manager.start_kernel()
-        _track_kernel(_normalize_path(temp_notebook), kernel_id)
+        _kernel_tracker.track(_normalize_path(temp_notebook), kernel_id)
 
         result = await shutdown_notebook(temp_notebook, shutdown_kernel=True)
         assert "kernel_id" in result
