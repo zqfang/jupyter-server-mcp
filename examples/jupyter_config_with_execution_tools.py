@@ -136,16 +136,25 @@ c.MCPExtensionApp.mcp_tools = [
 
 # Allow connections from any IP (useful for remote access)
 # WARNING: Only use this on trusted networks!
-# c.ServerApp.ip = '0.0.0.0'
+c.ServerApp.ip = '0.0.0.0'
 
 # Disable browser auto-open (useful for headless servers)
-# c.ServerApp.open_browser = False
+c.ServerApp.open_browser = False
 
 # Set a custom port for Jupyter Lab (separate from MCP port)
-# c.ServerApp.port = 8888
+c.ServerApp.port = 8888
+
+# Allow cross-origin requests (if accessing from different origins)
+c.ServerApp.allow_origin = '*'
 
 # Set a token for authentication
-# c.ServerApp.token = 'your-secret-token-here'
+c.IdentityProvider.token = 'BLOCK'
 
 # Enable debug logging for troubleshooting
-# c.MCPExtensionApp.log_level = 'DEBUG'
+c.MCPExtensionApp.log_level = 'DEBUG'
+
+# Set Jupyter root directory to current folder
+c.ServerApp.root_dir = "."
+
+# Enable autoreload for development
+c.ServerApp.autoreload = True  

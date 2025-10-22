@@ -73,7 +73,7 @@ uv pip install -e ".[dev]"
 
 
 # Run jupyter
-jupyter lab --no-browser --autoreload --config examples/jupyter_config_with_excution_tools.py
+jupyter lab --config examples/jupyter_config_with_execution_tools.py
 ```
 
 ## Verifying Installation
