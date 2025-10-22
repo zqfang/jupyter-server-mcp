@@ -63,7 +63,7 @@ For running tests and contributing:
 source .venv/bin/activate
 
 # install the env
-uv sync
+uv sync --prerelease=allow
 
 # Install with test dependencies
 uv pip install -e ".[test]"
