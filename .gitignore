@@ -214,3 +214,6 @@ __marimo__/
 .virtual_documents
 .DS_Store
 .jupyter_ystore.db
+# pixi environments
+.pixi/*
+!.pixi/config.toml

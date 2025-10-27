@@ -1,8 +1,8 @@
 # Changelog
 
-<!-- <START NEW CHANGELOG ENTRY> -->
 
-## 0.1.2 (Unreleased)
+
+## 0.2.0 (Unreleased)
 
 ### Bug Fixes
 
@@ -23,9 +23,27 @@
   - **Affects:** All code execution functions: `execute_cell()`, `modify_notebook_cells()`, `execute_notebook()`, `execute_notebook_code()`
   - **User benefit:** Cells can now be referenced by execution count `[1]`, `[2]`, etc. in JupyterLab UI
 
-<!-- <END NEW CHANGELOG ENTRY> -->
 
-<!-- <START NEW CHANGELOG ENTRY> -->
+## 0.1.2
+
+([Full Changelog](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/compare/v0.1.1...754ead215d3a9bb6e46f9e8d874bb9911caec3eb))
+
+### Enhancements made
+
+- Add automatic tool discovery via Python entrypoints [#10](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/pull/10) ([@Zsailer](https://github.com/Zsailer))
+
+### Documentation improvements
+
+- Add screencast to the README [#9](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/pull/9) ([@jtpio](https://github.com/jtpio))
+- Add Gemini CLI configuration [#6](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/pull/6) ([@jtpio](https://github.com/jtpio))
+- Update README to the new toolkit [#5](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/pull/5) ([@jtpio](https://github.com/jtpio))
+
+### Contributors to this release
+
+([GitHub contributors page for this release](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/graphs/contributors?from=2025-09-11&to=2025-10-24&type=c))
+
+[@jtpio](https://github.com/search?q=repo%3Ajupyter-ai-contrib%2Fjupyter-server-mcp+involves%3Ajtpio+updated%3A2025-09-11..2025-10-24&type=Issues) | [@Zsailer](https://github.com/search?q=repo%3Ajupyter-ai-contrib%2Fjupyter-server-mcp+involves%3AZsailer+updated%3A2025-09-11..2025-10-24&type=Issues)
+
 
 ## 0.1.1
 
@@ -46,5 +64,3 @@
 ([GitHub contributors page for this release](https://github.com/jupyter-ai-contrib/jupyter-server-mcp/graphs/contributors?from=2025-08-14&to=2025-09-11&type=c))
 
 [@jtpio](https://github.com/search?q=repo%3Ajupyter-ai-contrib%2Fjupyter-server-mcp+involves%3Ajtpio+updated%3A2025-08-14..2025-09-11&type=Issues) | [@Zsailer](https://github.com/search?q=repo%3Ajupyter-ai-contrib%2Fjupyter-server-mcp+involves%3AZsailer+updated%3A2025-08-14..2025-09-11&type=Issues)
-
-<!-- <END NEW CHANGELOG ENTRY> -->
