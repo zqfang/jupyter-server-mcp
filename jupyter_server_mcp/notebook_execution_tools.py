@@ -1,6 +1,7 @@
 """Notebook execution tools for Jupyter Server MCP extension.
 
 This module provides tools for executing code and managing Jupyter kernels.
+Supports collaborative editing via YDoc when notebooks are open in JupyterLab.
 """
 
 import asyncio
@@ -8,10 +9,21 @@ import inspect
 import logging
 import os
 from typing import Any
+from urllib.parse import unquote
 
 import nbformat
 from nbformat.notebooknode import from_dict
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
+
+# Collaborative editing support (optional)
+try:
+    from jupyter_ydoc import YNotebook
+    from pycrdt import Text as YText
+    YDOC_AVAILABLE = True
+except ImportError:
+    YDOC_AVAILABLE = False
+    YNotebook = None
+    YText = None
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +83,29 @@ _kernel_tracker = _KernelTracker()
 # ============================================================================
 
 def _normalize_path(path: str) -> str:
-    """Normalize a file path to an absolute path."""
-    return os.path.abspath(path)
+    """Normalize a file path to an absolute path.
+
+    Handles URL-encoded paths and resolves relative paths against
+    the Jupyter server root directory if available.
+    """
+    if not path or not path.strip():
+        raise ValueError("path cannot be empty")
+
+    # URL decode in case path contains encoded characters
+    decoded_path = unquote(path)
+
+    # If already absolute, return normalized
+    if os.path.isabs(decoded_path):
+        return os.path.abspath(decoded_path)
+
+    # For relative paths, try to resolve against server root
+    serverapp = get_server_context()
+    if serverapp and hasattr(serverapp, 'root_dir'):
+        root_dir = serverapp.root_dir
+        return os.path.abspath(os.path.join(root_dir, decoded_path))
+
+    # Fallback to current working directory
+    return os.path.abspath(decoded_path)
 
 
 def _require_server_context():
@@ -163,6 +196,208 @@ def _write_notebook(notebook_path: str, nb) -> None:
     """Write a notebook object to a file."""
     with open(notebook_path, "w", encoding="utf-8") as f:
         nbformat.write(nb, f)
+
+
+# ============================================================================
+# YDoc Collaborative Editing Support
+# ============================================================================
+
+async def _get_file_id(file_path: str) -> str | None:
+    """Get the file ID for a document from the file ID manager.
+
+    Args:
+        file_path: Normalized absolute path to the document
+
+    Returns:
+        File ID string if available, None otherwise
+    """
+    if not YDOC_AVAILABLE:
+        return None
+
+    serverapp = get_server_context()
+    if not serverapp:
+        return None
+
+    try:
+        file_id_manager = serverapp.web_app.settings.get("file_id_manager")
+        if not file_id_manager:
+            return None
+
+        file_id = file_id_manager.get_id(file_path)
+        return file_id
+    except Exception as e:
+        logger.debug(f"Could not get file ID for {file_path}: {e}")
+        return None
+
+
+async def _get_ydoc_room(room_id: str):
+    """Get a YDoc room by room ID.
+
+    Args:
+        room_id: The room identifier (format: "json:notebook:{file_id}")
+
+    Returns:
+        Room object if available, None otherwise
+    """
+    serverapp = get_server_context()
+    if not serverapp:
+        return None
+
+    try:
+        # Try jupyter-server-documents approach first (newer)
+        yroom_manager = serverapp.web_app.settings.get("yroom_manager")
+        if yroom_manager:
+            if hasattr(yroom_manager, 'has_room') and yroom_manager.has_room(room_id):
+                return yroom_manager.get_room(room_id)
+            return None
+
+        # Fallback to jupyter_server_ydoc approach (older)
+        jupyter_server_ydoc = serverapp.web_app.settings.get("jupyter_server_ydoc")
+        if jupyter_server_ydoc:
+            ywebsocket_server = jupyter_server_ydoc.ywebsocket_server
+            if hasattr(ywebsocket_server, 'room_exists') and ywebsocket_server.room_exists(room_id):
+                return await ywebsocket_server.get_room(room_id)
+
+        return None
+    except Exception as e:
+        logger.debug(f"Could not get room {room_id}: {e}")
+        return None
+
+
+async def _get_ynotebook(file_path: str):
+    """Get YNotebook instance for a file if it's open in JupyterLab.
+
+    Args:
+        file_path: Normalized absolute path to notebook
+
+    Returns:
+        YNotebook instance if notebook is open, None otherwise
+    """
+    if not YDOC_AVAILABLE:
+        return None
+
+    try:
+        # Get file ID
+        file_id = await _get_file_id(file_path)
+        if not file_id:
+            return None
+
+        # Get room
+        room_id = f"json:notebook:{file_id}"
+        yroom = await _get_ydoc_room(room_id)
+        if not yroom:
+            return None
+
+        # Get YNotebook from room
+        # Try new API first, fall back to old
+        if hasattr(yroom, 'get_jupyter_ydoc'):
+            return await yroom.get_jupyter_ydoc()
+        elif hasattr(yroom, '_document'):
+            return yroom._document
+        else:
+            return None
+
+    except Exception as e:
+        logger.debug(f"Could not get YNotebook for {file_path}: {e}")
+        return None
+
+
+def _get_cell_index_by_id_ydoc(ydoc, cell_id: str) -> int | None:
+    """Get cell index from cell ID using YDoc.
+
+    Args:
+        ydoc: YNotebook instance
+        cell_id: Cell UUID
+
+    Returns:
+        Cell index if found, None otherwise
+    """
+    try:
+        cell_index, _ = ydoc.find_cell(cell_id)
+        return cell_index
+    except Exception:
+        return None
+
+
+def _get_cell_index_by_id_nbformat(nb, cell_id: str) -> int | None:
+    """Get cell index from cell ID using nbformat notebook.
+
+    Args:
+        nb: nbformat notebook object
+        cell_id: Cell UUID
+
+    Returns:
+        Cell index if found, None otherwise
+    """
+    for i, cell in enumerate(nb.cells):
+        # Check both cell.id and cell.metadata.id
+        if hasattr(cell, 'id') and cell.id == cell_id:
+            return i
+        if cell.get('id') == cell_id:
+            return i
+        cell_metadata_id = cell.get('metadata', {}).get('id')
+        if cell_metadata_id == cell_id:
+            return i
+    return None
+
+
+def _update_cell_outputs_ydoc(ydoc, cell_index: int, execution_count: int | None, outputs: list):
+    """Update cell outputs in YDoc (for open notebooks).
+
+    This updates the cell's execution count and outputs directly in YDoc memory,
+    which makes changes immediately visible in JupyterLab without disk I/O.
+
+    Args:
+        ydoc: YNotebook instance
+        cell_index: Index of cell to update
+        execution_count: Execution counter from kernel
+        outputs: List of output dicts from execution
+    """
+    if cell_index >= ydoc.cell_number:
+        logger.warning(f"Cell index {cell_index} out of range in YDoc (has {ydoc.cell_number} cells)")
+        return
+
+    try:
+        ycell = ydoc.ycells[cell_index]
+
+        # Update execution count
+        if execution_count is not None:
+            ycell["execution_count"] = execution_count
+
+        # Update outputs (YDoc expects list of dicts)
+        if outputs is not None:
+            ycell["outputs"] = outputs
+
+        logger.debug(f"Updated cell {cell_index} outputs in YDoc (execution_count={execution_count})")
+
+    except Exception as e:
+        logger.warning(f"Failed to update cell outputs in YDoc: {e}")
+
+
+async def _get_cell_by_id(notebook_path: str, cell_id: str) -> tuple[Any, int] | None:
+    """Get cell and its index by cell ID, trying YDoc first.
+
+    Args:
+        notebook_path: Normalized path to notebook
+        cell_id: Cell UUID
+
+    Returns:
+        Tuple of (cell, index) if found, None otherwise
+    """
+    # Try YDoc first if available
+    ydoc = await _get_ynotebook(notebook_path)
+    if ydoc:
+        cell_index = _get_cell_index_by_id_ydoc(ydoc, cell_id)
+        if cell_index is not None and 0 <= cell_index < ydoc.cell_number:
+            return (ydoc.ycells[cell_index], cell_index)
+
+    # Fallback to nbformat
+    nb = _read_notebook(notebook_path)
+    cell_index = _get_cell_index_by_id_nbformat(nb, cell_id)
+    if cell_index is not None:
+        return (nb.cells[cell_index], cell_index)
+
+    return None
 
 
 def set_server_context(serverapp):
@@ -762,13 +997,49 @@ async def _query_view_source(
     if execution_count is not None and position_index is not None:
         raise ValueError("Cannot provide both execution_count and position_index.")
 
-    # Require server context
-    _require_server_context()
-
     # Normalize path
     notebook_path = _normalize_path(notebook_path)
 
-    # Read the notebook
+    # Try YDoc first for active notebooks
+    ydoc = await _get_ynotebook(notebook_path)
+    if ydoc:
+        logger.debug("Using YDoc for view_source")
+        # Convert YDoc cells to standard format
+        cells = []
+        for i in range(ydoc.cell_number):
+            ycell = ydoc.ycells[i]
+            cell_dict = {
+                "cell_type": ycell.get("cell_type", "code"),
+                "source": str(ycell.get("source", "")),
+                "metadata": dict(ycell.get("metadata", {})),
+            }
+            if cell_dict["cell_type"] == "code":
+                cell_dict["execution_count"] = ycell.get("execution_count")
+                cell_dict["outputs"] = list(ycell.get("outputs", []))
+            cells.append(cell_dict)
+
+        # View all cells if no specific cell requested
+        if execution_count is None and position_index is None:
+            logger.info("Viewing all cells from YDoc")
+            return _filter_output_dicts(cells)
+
+        # Find cell by execution_count
+        if position_index is None and execution_count is not None:
+            for i, cell in enumerate(cells):
+                if cell.get("cell_type") == "code" and cell.get("execution_count") == execution_count:
+                    position_index = i
+                    break
+
+            if position_index is None:
+                raise ValueError(f"No cells found with execution count {execution_count}")
+
+        # Validate and return cell
+        if position_index >= len(cells):
+            raise IndexError(f"Cell index {position_index} out of range (notebook has {len(cells)} cells)")
+
+        return _filter_output_dicts([cells[position_index]])[0]
+
+    # Fallback to nbformat
     try:
         nb = _read_notebook(notebook_path)
     except FileNotFoundError:
@@ -1093,20 +1364,24 @@ async def _execute_and_update_cell(
     timeout: int = 30
 ) -> dict[str, Any]:
     """Execute code and update cell with results in one atomic operation.
-    
+
+    Now YDoc-aware: updates outputs in YDoc for open notebooks,
+    or in disk file for closed notebooks. This prevents the bug where
+    disk writes would overwrite YDoc changes and delete cells.
+
     This consolidates the common pattern of:
     1. Execute code in kernel
     2. Track new kernel if started
-    3. Update notebook cell with results
+    3. Update notebook cell with results (via YDoc or nbformat)
     4. Filter outputs for response
-    
+
     Args:
         notebook_path: Normalized path to notebook
         cell_index: Index of cell to update
         code: Code to execute
         kernel_id: Optional kernel ID to use
         timeout: Execution timeout
-        
+
     Returns:
         dict: Execution results with filtered outputs
     """
@@ -1123,18 +1398,46 @@ async def _execute_and_update_cell(
     # Track kernel if new
     if exec_results.get("started_new_kernel"):
         _kernel_tracker.track(notebook_path, exec_results["kernel_id"])
-    
-    # Update notebook cell atomically
-    with _NotebookContext(notebook_path) as nb:
-        if cell_index < len(nb.cells):
-            cell = nb.cells[cell_index]
-            if exec_results.get("execution_count") is not None:
-                cell.execution_count = exec_results["execution_count"]
-            # Save UNFILTERED outputs to notebook file
-            if exec_results.get("outputs"):
-                cell.outputs = _convert_outputs_to_notebook_nodes(exec_results["outputs"])
-        else:
-            logger.warning(f"Cell index {cell_index} out of range after reading notebook")
+
+    # Try YDoc first for collaborative editing
+    ydoc = await _get_ynotebook(notebook_path)
+
+    if ydoc:
+        # Update outputs in YDoc (memory-based, collaborative)
+        logger.info(f"Updating cell {cell_index} outputs via YDoc")
+        _update_cell_outputs_ydoc(
+            ydoc,
+            cell_index,
+            exec_results.get("execution_count"),
+            exec_results.get("outputs", [])
+        )
+
+        # IMPORTANT: Also persist to disk so outputs are saved in the notebook file
+        # YDoc updates are in-memory only and won't survive if JupyterLab closes
+        # We do this AFTER YDoc update to ensure user sees outputs immediately in UI
+        logger.debug(f"Persisting cell {cell_index} outputs to disk")
+        with _NotebookContext(notebook_path) as nb:
+            if cell_index < len(nb.cells):
+                cell = nb.cells[cell_index]
+                if exec_results.get("execution_count") is not None:
+                    cell.execution_count = exec_results["execution_count"]
+                if exec_results.get("outputs"):
+                    cell.outputs = _convert_outputs_to_notebook_nodes(exec_results["outputs"])
+            else:
+                logger.warning(f"Cell index {cell_index} out of range in disk notebook")
+    else:
+        # Fallback: Update notebook cell atomically on disk
+        logger.debug(f"Updating cell {cell_index} outputs via nbformat")
+        with _NotebookContext(notebook_path) as nb:
+            if cell_index < len(nb.cells):
+                cell = nb.cells[cell_index]
+                if exec_results.get("execution_count") is not None:
+                    cell.execution_count = exec_results["execution_count"]
+                # Save UNFILTERED outputs to notebook file
+                if exec_results.get("outputs"):
+                    cell.outputs = _convert_outputs_to_notebook_nodes(exec_results["outputs"])
+            else:
+                logger.warning(f"Cell index {cell_index} out of range after reading notebook")
     
     # Return results with filtered outputs for MCP response
     filtered_results = {
@@ -1176,19 +1479,55 @@ async def _modify_add_code_cell(
     logger.info("Adding code cell")
     notebook_path = _normalize_path(notebook_path)
 
-    # Add cell to notebook atomically
-    with _NotebookContext(notebook_path) as nb:
-        new_cell = new_code_cell(source=cell_content)
-        
-        # Insert at position or append
-        if position_index is not None:
-            if position_index > len(nb.cells):
-                position_index = len(nb.cells)
-            nb.cells.insert(position_index, new_cell)
-            inserted_index = position_index
-        else:
-            nb.cells.append(new_cell)
-            inserted_index = len(nb.cells) - 1
+    # Try YDoc first for collaborative editing
+    ydoc = await _get_ynotebook(notebook_path)
+    inserted_index = None
+
+    if ydoc:
+        logger.info("Using YDoc for collaborative add_code_cell")
+        try:
+            # Create new cell dict
+            cell_dict = {
+                "cell_type": "code",
+                "source": cell_content,
+                "metadata": {},
+                "outputs": [],
+                "execution_count": None
+            }
+
+            # Create YCell
+            ycell = ydoc.create_ycell(cell_dict)
+
+            # Insert at position or append
+            if position_index is not None:
+                if position_index > ydoc.cell_number:
+                    position_index = ydoc.cell_number
+                ydoc.ycells.insert(position_index, ycell)
+                inserted_index = position_index
+            else:
+                ydoc.ycells.append(ycell)
+                inserted_index = ydoc.cell_number - 1
+
+            logger.info(f"Added cell via YDoc at position {inserted_index}")
+
+        except Exception as e:
+            logger.warning(f"YDoc add failed, falling back to nbformat: {e}")
+            ydoc = None  # Force fallback
+
+    # Fallback to nbformat
+    if not ydoc:
+        with _NotebookContext(notebook_path) as nb:
+            new_cell = new_code_cell(source=cell_content)
+
+            # Insert at position or append
+            if position_index is not None:
+                if position_index > len(nb.cells):
+                    position_index = len(nb.cells)
+                nb.cells.insert(position_index, new_cell)
+                inserted_index = position_index
+            else:
+                nb.cells.append(new_cell)
+                inserted_index = len(nb.cells) - 1
 
     results = {"message": f"Code cell added at position {inserted_index}"}
 
@@ -1197,18 +1536,18 @@ async def _modify_add_code_cell(
         try:
             logger.info("Cell added successfully, now executing")
             kernel_id = _kernel_tracker.get(notebook_path)
-            
+
             # Use the new consolidated execution helper
             exec_results = await _execute_and_update_cell(
-                notebook_path, 
-                inserted_index, 
-                cell_content, 
+                notebook_path,
+                inserted_index,
+                cell_content,
                 kernel_id
             )
-            
+
             # Merge execution results into response
             results.update(exec_results)
-            
+
         except Exception as e:
             import traceback
             logger.error(f"Error during execution: {e}")
@@ -1250,14 +1589,47 @@ async def _modify_edit_code_cell(
     logger.info("Editing code cell")
     notebook_path = _normalize_path(notebook_path)
 
-    # Edit cell atomically
-    with _NotebookContext(notebook_path) as nb:
-        _validate_cell_index(nb, position_index, "edit")
-        
-        # Update cell source and clear previous execution
-        nb.cells[position_index].source = cell_content
-        nb.cells[position_index].execution_count = None
-        nb.cells[position_index].outputs = []
+    # Try YDoc first for collaborative editing
+    ydoc = await _get_ynotebook(notebook_path)
+
+    if ydoc:
+        logger.info("Using YDoc for collaborative edit_code_cell")
+        try:
+            # Validate index
+            if position_index >= ydoc.cell_number:
+                raise IndexError(f"Cell index {position_index} out of range (notebook has {ydoc.cell_number} cells)")
+
+            # Get the cell
+            ycell = ydoc.ycells[position_index]
+
+            # Update cell source (simply replace the entire content)
+            ysource = ycell.get("source")
+            if isinstance(ysource, YText):
+                # Clear existing content and set new content
+                ysource.clear()
+                ysource.extend(cell_content)
+            else:
+                ycell["source"] = cell_content
+
+            # Clear execution data
+            ycell["execution_count"] = None
+            ycell["outputs"] = []
+
+            logger.info(f"Edited cell via YDoc at position {position_index}")
+
+        except Exception as e:
+            logger.warning(f"YDoc edit failed, falling back to nbformat: {e}")
+            ydoc = None  # Force fallback
+
+    # Fallback to nbformat
+    if not ydoc:
+        with _NotebookContext(notebook_path) as nb:
+            _validate_cell_index(nb, position_index, "edit")
+
+            # Update cell source and clear previous execution
+            nb.cells[position_index].source = cell_content
+            nb.cells[position_index].execution_count = None
+            nb.cells[position_index].outputs = []
 
     results = {"message": f"Code cell at position {position_index} edited"}
 
@@ -1265,7 +1637,7 @@ async def _modify_edit_code_cell(
     if execute:
         try:
             kernel_id = _kernel_tracker.get(notebook_path)
-            
+
             # Use the new consolidated execution helper
             exec_results = await _execute_and_update_cell(
                 notebook_path,
@@ -1273,10 +1645,10 @@ async def _modify_edit_code_cell(
                 cell_content,
                 kernel_id
             )
-            
+
             # Merge execution results into response
             results.update(exec_results)
-            
+
         except Exception as e:
             logger.error(f"Error during code cell edit execution: {e}")
             results["error"] = str(e)
@@ -1291,7 +1663,7 @@ async def _modify_add_markdown_cell(
     position_index: int | None = None
 ) -> dict:
     """Add a markdown cell in a Jupyter notebook.
-    
+
     Technically might be a little risky to mark this as refreshes_state because the user could make
     other changes that are invisible to goose. But trying it out this way because I don't think
     goose adding a markdown cell should necessarily force it to view the full notebook source on
@@ -1304,22 +1676,48 @@ async def _modify_add_markdown_cell(
     notebook_path = _normalize_path(notebook_path)
 
     try:
-        # Add markdown cell atomically
-        with _NotebookContext(notebook_path) as nb:
-            new_cell = new_markdown_cell(source=cell_content)
-            
+        # Try YDoc first for collaborative editing
+        ydoc = await _get_ynotebook(notebook_path)
+
+        if ydoc:
+            logger.info("Using YDoc for collaborative add_markdown_cell")
+            # Create new markdown cell dict
+            cell_dict = {
+                "cell_type": "markdown",
+                "source": cell_content,
+                "metadata": {}
+            }
+
+            # Create YCell
+            ycell = ydoc.create_ycell(cell_dict)
+
             # Insert at position or append
             if position_index is not None:
-                if position_index > len(nb.cells):
-                    position_index = len(nb.cells)
-                nb.cells.insert(position_index, new_cell)
+                if position_index > ydoc.cell_number:
+                    position_index = ydoc.cell_number
+                ydoc.ycells.insert(position_index, ycell)
                 message = f"Markdown cell inserted at position {position_index}"
             else:
-                nb.cells.append(new_cell)
+                ydoc.ycells.append(ycell)
                 message = "Markdown cell added"
-        
+
+        else:
+            # Fallback to nbformat
+            with _NotebookContext(notebook_path) as nb:
+                new_cell = new_markdown_cell(source=cell_content)
+
+                # Insert at position or append
+                if position_index is not None:
+                    if position_index > len(nb.cells):
+                        position_index = len(nb.cells)
+                    nb.cells.insert(position_index, new_cell)
+                    message = f"Markdown cell inserted at position {position_index}"
+                else:
+                    nb.cells.append(new_cell)
+                    message = "Markdown cell added"
+
         return {"message": message, "error": ""}
-        
+
     except Exception as e:
         logger.error(f"Error adding markdown cell: {e}")
         return {"message": "", "error": str(e)}
@@ -1331,7 +1729,7 @@ async def _modify_edit_markdown_cell(
     cell_content: str
 ) -> dict:
     """Edit an existing markdown cell in a Jupyter notebook.
-    
+
      Note that users can edit cell contents too, so if you are making assumptions about the
     position_index of the cell to edit based on chat history with the user, you should first
     make sure the notebook state matches your expected state using your query_notebook tool.
@@ -1354,9 +1752,9 @@ async def _modify_edit_markdown_cell(
     ------
         McpError: If notebook state has changed since last viewed
         McpError: If there's an error connecting to the Jupyter server
-        IndexError: If position_index is out of range   
-    
-    
+        IndexError: If position_index is out of range
+
+
     """
     if not cell_content:
         raise ValueError("cell_content is required for edit_markdown operation")
@@ -1367,13 +1765,34 @@ async def _modify_edit_markdown_cell(
     notebook_path = _normalize_path(notebook_path)
 
     try:
-        # Edit markdown cell atomically
-        with _NotebookContext(notebook_path) as nb:
-            _validate_cell_index(nb, position_index, "edit")
-            nb.cells[position_index].source = cell_content
-        
+        # Try YDoc first for collaborative editing
+        ydoc = await _get_ynotebook(notebook_path)
+
+        if ydoc:
+            logger.info("Using YDoc for collaborative edit_markdown_cell")
+            # Validate index
+            if position_index >= ydoc.cell_number:
+                raise IndexError(f"Cell index {position_index} out of range (notebook has {ydoc.cell_number} cells)")
+
+            # Get the cell
+            ycell = ydoc.ycells[position_index]
+
+            # Update cell source
+            ysource = ycell.get("source")
+            if isinstance(ysource, YText):
+                ysource.clear()
+                ysource.extend(cell_content)
+            else:
+                ycell["source"] = cell_content
+
+        else:
+            # Fallback to nbformat
+            with _NotebookContext(notebook_path) as nb:
+                _validate_cell_index(nb, position_index, "edit")
+                nb.cells[position_index].source = cell_content
+
         return {"message": "Markdown cell edited", "error": ""}
-        
+
     except Exception as e:
         logger.error(f"Error editing markdown cell: {e}")
         return {"message": "", "error": str(e)}
@@ -1381,7 +1800,7 @@ async def _modify_edit_markdown_cell(
 
 async def _modify_delete_cell(notebook_path: str, position_index: int) -> dict:
     """Delete a cell in a Jupyter notebook.
-    
+
     Note that users can edit cell contents too, so if you assume you know the position_index
     of the cell to delete based on past chat history, you should first make sure the notebook state
     matches your expected state using your query_notebook tool. If it does not match the
@@ -1391,7 +1810,7 @@ async def _modify_delete_cell(notebook_path: str, position_index: int) -> dict:
     A motivating example for why this is state-dependent: user asks goose to add a new cell,
     then user runs a few cells manually (changing execution_counts), then tells goose
     "now delete it". In the context of the conversation, this looks fine and Goose may assume it
-    knows the correct position_index already, but its knowledge is outdated.  
+    knows the correct position_index already, but its knowledge is outdated.
     """
     if position_index is None:
         raise ValueError("position_index is required for delete operation")
@@ -1399,13 +1818,26 @@ async def _modify_delete_cell(notebook_path: str, position_index: int) -> dict:
     notebook_path = _normalize_path(notebook_path)
 
     try:
-        # Delete cell atomically
-        with _NotebookContext(notebook_path) as nb:
-            _validate_cell_index(nb, position_index, "delete")
-            del nb.cells[position_index]
-        
+        # Try YDoc first for collaborative editing
+        ydoc = await _get_ynotebook(notebook_path)
+
+        if ydoc:
+            logger.info("Using YDoc for collaborative delete_cell")
+            # Validate index
+            if position_index >= ydoc.cell_number:
+                raise IndexError(f"Cell index {position_index} out of range (notebook has {ydoc.cell_number} cells)")
+
+            # Delete the cell
+            del ydoc.ycells[position_index]
+
+        else:
+            # Fallback to nbformat
+            with _NotebookContext(notebook_path) as nb:
+                _validate_cell_index(nb, position_index, "delete")
+                del nb.cells[position_index]
+
         return {"message": "Cell deleted", "error": ""}
-        
+
     except Exception as e:
         return {"message": "", "error": str(e)}
 
@@ -1593,6 +2025,67 @@ async def query_notebook(
         raise ValueError(
             f"Invalid query_type: {query_type}. Must be one of: view_source, check_server, list_sessions, list_kernels, get_position_index"
         )
+
+
+async def read_cell(
+    notebook_path: str,
+    position_index: int | None = None,
+    cell_id: str | None = None,
+    execution_count: int | None = None,
+) -> dict[str, Any]:
+    """Read a single notebook cell - convenience function.
+
+    Simpler alternative to query_notebook for reading individual cells.
+    Supports multiple ways to identify cells: position index, cell UUID, or execution count.
+
+    Args:
+        notebook_path: Path to the notebook file (relative or absolute)
+        position_index: Cell position (0-indexed). Examples: 0 (first cell), 1 (second cell)
+        cell_id: Cell UUID (e.g., "205658d6-093c-4722-854c-90b149f254ad")
+        execution_count: Execution count shown in Jupyter UI (e.g., [3])
+
+    Returns:
+        dict: Cell information containing:
+            - cell_type: "code", "markdown", or "raw"
+            - source: Cell source code/content
+            - metadata: Cell metadata dict
+            - execution_count: (code cells only) Execution counter
+            - outputs: (code cells only) Filtered cell outputs
+
+    Examples:
+        # Read first cell
+        cell = await read_cell("analysis.ipynb", position_index=0)
+
+        # Read cell by UUID
+        cell = await read_cell("analysis.ipynb", cell_id="abc-123-def")
+
+        # Read cell by execution count
+        cell = await read_cell("analysis.ipynb", execution_count=3)
+
+    Raises:
+        ValueError: If no identifier provided or multiple identifiers provided
+        IndexError: If position_index is out of range
+        FileNotFoundError: If notebook doesn't exist
+    """
+    # Validate exactly one identifier is provided
+    identifiers = [position_index is not None, cell_id is not None, execution_count is not None]
+    if sum(identifiers) == 0:
+        raise ValueError("Must provide one of: position_index, cell_id, or execution_count")
+    if sum(identifiers) > 1:
+        raise ValueError("Provide only ONE of: position_index, cell_id, or execution_count")
+
+    # Normalize path
+    notebook_path = _normalize_path(notebook_path)
+
+    # If cell_id provided, resolve to position_index first
+    if cell_id is not None:
+        result = await _get_cell_by_id(notebook_path, cell_id)
+        if result is None:
+            raise ValueError(f"Cell with ID {cell_id} not found in notebook")
+        _, position_index = result
+
+    # Use query_notebook for the actual read
+    return await _query_view_source(notebook_path, execution_count, position_index)
 
 
 async def execute_notebook_code(
